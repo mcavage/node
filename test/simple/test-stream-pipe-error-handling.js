@@ -19,44 +19,40 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#ifndef NODE_IDLE_H_
-#define NODE_IDLE_H_
+var common = require('../common');
+var assert = require('assert');
+var Stream = require('stream').Stream;
 
-#include <node_object_wrap.h>
-#include <ev.h>
+(function testErrorListenerCatches() {
+  var source = new Stream();
+  var dest = new Stream();
 
-namespace node {
+  source.pipe(dest);
 
-class IdleWatcher : ObjectWrap {
- public:
-  static void Initialize(v8::Handle<v8::Object> target);
+  var gotErr = null;
+  source.on('error', function(err) {
+    gotErr = err;
+  });
 
- protected:
-  static v8::Persistent<v8::FunctionTemplate> constructor_template;
+  var err = new Error('This stream turned into bacon.');
+  source.emit('error', err);
+  assert.strictEqual(gotErr, err);
+})();
 
-  IdleWatcher() : ObjectWrap() {
-    ev_idle_init(&watcher_, IdleWatcher::Callback);
-    watcher_.data = this;
+(function testErrorWithoutListenerThrows() {
+  var source = new Stream();
+  var dest = new Stream();
+
+  source.pipe(dest);
+
+  var err = new Error('This stream turned into bacon.');
+
+  var gotErr = null;
+  try {
+    source.emit('error', err);
+  } catch (e) {
+    gotErr = e;
   }
 
-  ~IdleWatcher() {
-    ev_idle_stop(EV_DEFAULT_UC_ &watcher_);
-  }
-
-  static v8::Handle<v8::Value> New(const v8::Arguments& args);
-  static v8::Handle<v8::Value> Start(const v8::Arguments& args);
-  static v8::Handle<v8::Value> Stop(const v8::Arguments& args);
-  static v8::Handle<v8::Value> SetPriority(const v8::Arguments& args);
-
- private:
-  static void Callback(EV_P_ ev_idle *watcher, int revents);
-
-  void Start();
-  void Stop();
-
-  ev_idle watcher_;
-};
-
-}  // namespace node
-#endif  // NODE_IDLE_H_
-
+  assert.strictEqual(gotErr, err);
+})();
