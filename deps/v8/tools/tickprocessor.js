@@ -146,7 +146,12 @@ SnapshotLogProcessor.prototype.getSerializedEntryName = function(pos) {
 
 
 function TickProcessor(
-    cppEntriesProvider, separateIc, ignoreUnknown, stateFilter, snapshotLogProcessor) {
+    cppEntriesProvider,
+    separateIc,
+    callGraphSize,
+    ignoreUnknown,
+    stateFilter,
+    snapshotLogProcessor) {
   LogReader.call(this, {
       'shared-library': { parsers: [null, parseInt, parseInt],
           processor: this.processSharedLibrary },
@@ -161,29 +166,27 @@ function TickProcessor(
           processor: this.processFunctionMove },
       'snapshot-pos': { parsers: [parseInt, parseInt],
           processor: this.processSnapshotPosition },
-      'tick': { parsers: [parseInt, parseInt, parseInt, parseInt, 'var-args'],
+      'tick': {
+          parsers: [parseInt, parseInt, parseInt,
+                    parseInt, parseInt, 'var-args'],
           processor: this.processTick },
       'heap-sample-begin': { parsers: [null, null, parseInt],
           processor: this.processHeapSampleBegin },
       'heap-sample-end': { parsers: [null, null],
           processor: this.processHeapSampleEnd },
-      'heap-js-prod-item': { parsers: [null, 'var-args'],
-          processor: this.processJSProducer },
       // Ignored events.
       'profiler': null,
       'function-creation': null,
       'function-move': null,
       'function-delete': null,
-      'heap-sample-stats': null,
       'heap-sample-item': null,
-      'heap-js-cons-item': null,
-      'heap-js-ret-item': null,
       // Obsolete row types.
       'code-allocate': null,
       'begin-code-region': null,
       'end-code-region': null });
 
   this.cppEntriesProvider_ = cppEntriesProvider;
+  this.callGraphSize_ = callGraphSize;
   this.ignoreUnknown_ = ignoreUnknown;
   this.stateFilter_ = stateFilter;
   this.snapshotLogProcessor_ = snapshotLogProcessor;
@@ -243,6 +246,7 @@ TickProcessor.CodeTypes = {
 
 TickProcessor.CALL_PROFILE_CUTOFF_PCT = 2.0;
 
+TickProcessor.CALL_GRAPH_SIZE = 5;
 
 /**
  * @override
@@ -343,23 +347,35 @@ TickProcessor.prototype.includeTick = function(vmState) {
   return this.stateFilter_ == null || this.stateFilter_ == vmState;
 };
 
-
-TickProcessor.prototype.processTick = function(pc, sp, tos, vmState, stack) {
+TickProcessor.prototype.processTick = function(pc,
+                                               sp,
+                                               is_external_callback,
+                                               tos_or_external_callback,
+                                               vmState,
+                                               stack) {
   this.ticks_.total++;
   if (vmState == TickProcessor.VmStates.GC) this.ticks_.gc++;
   if (!this.includeTick(vmState)) {
     this.ticks_.excluded++;
     return;
   }
-
-  if (tos) {
-    var funcEntry = this.profile_.findEntry(tos);
+  if (is_external_callback) {
+    // Don't use PC when in external callback code, as it can point
+    // inside callback's code, and we will erroneously report
+    // that a callback calls itself. Instead we use tos_or_external_callback,
+    // as simply resetting PC will produce unaccounted ticks.
+    pc = tos_or_external_callback;
+    tos_or_external_callback = 0;
+  } else if (tos_or_external_callback) {
+    // Find out, if top of stack was pointing inside a JS function
+    // meaning that we have encountered a frameless invocation.
+    var funcEntry = this.profile_.findEntry(tos_or_external_callback);
     if (!funcEntry || !funcEntry.isJSFunction || !funcEntry.isJSFunction()) {
-      tos = 0;
+      tos_or_external_callback = 0;
     }
   }
 
-  this.profile_.recordTick(this.processStack(pc, tos, stack));
+  this.profile_.recordTick(this.processStack(pc, tos_or_external_callback, stack));
 };
 
 
@@ -384,17 +400,6 @@ TickProcessor.prototype.processHeapSampleEnd = function(space, state) {
 
   this.currentProducerProfile_ = null;
   this.generation_++;
-};
-
-
-TickProcessor.prototype.processJSProducer = function(constructor, stack) {
-  if (!this.currentProducerProfile_) return;
-  if (stack.length == 0) return;
-  var first = stack.shift();
-  var processedStack =
-      this.profile_.resolveAndFilterFuncs_(this.processStack(first, 0, stack));
-  processedStack.unshift(constructor);
-  this.currentProducerProfile_.addPath(processedStack);
 };
 
 
@@ -537,7 +542,7 @@ TickProcessor.prototype.printHeavyProfile = function(profile, opt_indent) {
           padLeft(rec.parentTotalPercent.toFixed(1), 5) + '%  ' +
           indentStr + rec.internalFuncName);
     // Limit backtrace depth.
-    if (indent < 10) {
+    if (indent < 2 * self.callGraphSize_) {
       self.printHeavyProfile(rec.children, indent + 2);
     }
     // Delimit top-level functions.
@@ -766,6 +771,8 @@ function ArgumentsProcessor(args) {
         'Show only ticks from OTHER VM state'],
     '-e': ['stateFilter', TickProcessor.VmStates.EXTERNAL,
         'Show only ticks from EXTERNAL VM state'],
+    '--call-graph-size': ['callGraphSize', TickProcessor.CALL_GRAPH_SIZE,
+        'Set the call graph size'],
     '--ignore-unknown': ['ignoreUnknown', true,
         'Exclude ticks of unknown code entries from processing'],
     '--separate-ic': ['separateIc', true,
@@ -794,6 +801,7 @@ ArgumentsProcessor.DEFAULTS = {
   snapshotLogFileName: null,
   platform: 'unix',
   stateFilter: null,
+  callGraphSize: 5,
   ignoreUnknown: false,
   separateIc: false,
   nm: 'nm'

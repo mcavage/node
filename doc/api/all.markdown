@@ -1,4 +1,4 @@
-
+@include documentation
 @include synopsis
 @include globals
 @include stdio
@@ -6,12 +6,11 @@
 @include modules
 @include addons
 @include process
-@include constants
 @include util
-@include freelist
 @include events
-@include buffers
-@include streams
+@include domain
+@include buffer
+@include stream
 @include crypto
 @include tls
 @include string_decoder
@@ -27,12 +26,11 @@
 @include readline
 @include repl
 @include vm
-@include child_processes
+@include child_process
 @include assert
 @include tty
+@include zlib
 @include os
 @include debugger
-
-# Appendixes
+@include cluster
 @include appendix_1
-@include appendix_2

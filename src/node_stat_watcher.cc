@@ -19,7 +19,7 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include <node_stat_watcher.h>
+#include "node_stat_watcher.h"
 
 #include <assert.h>
 #include <string.h>
@@ -30,21 +30,16 @@ namespace node {
 using namespace v8;
 
 Persistent<FunctionTemplate> StatWatcher::constructor_template;
-
-static Persistent<String> change_symbol;
-static Persistent<String> stop_symbol;
+static Persistent<String> onchange_sym;
+static Persistent<String> onstop_sym;
 
 void StatWatcher::Initialize(Handle<Object> target) {
   HandleScope scope;
 
   Local<FunctionTemplate> t = FunctionTemplate::New(StatWatcher::New);
   constructor_template = Persistent<FunctionTemplate>::New(t);
-  constructor_template->Inherit(EventEmitter::constructor_template);
   constructor_template->InstanceTemplate()->SetInternalFieldCount(1);
   constructor_template->SetClassName(String::NewSymbol("StatWatcher"));
-
-  change_symbol = NODE_PSYMBOL("change");
-  stop_symbol = NODE_PSYMBOL("stop");
 
   NODE_SET_PROTOTYPE_METHOD(constructor_template, "start", StatWatcher::Start);
   NODE_SET_PROTOTYPE_METHOD(constructor_template, "stop", StatWatcher::Stop);
@@ -58,10 +53,13 @@ void StatWatcher::Callback(EV_P_ ev_stat *watcher, int revents) {
   StatWatcher *handler = static_cast<StatWatcher*>(watcher->data);
   assert(watcher == &handler->watcher_);
   HandleScope scope;
-  Handle<Value> argv[2];
-  argv[0] = Handle<Value>(BuildStatsObject(&watcher->attr));
-  argv[1] = Handle<Value>(BuildStatsObject(&watcher->prev));
-  handler->Emit(change_symbol, 2, argv);
+  Local<Value> argv[2];
+  argv[0] = BuildStatsObject(&watcher->attr);
+  argv[1] = BuildStatsObject(&watcher->prev);
+  if (onchange_sym.IsEmpty()) {
+    onchange_sym = NODE_PSYMBOL("onchange");
+  }
+  MakeCallback(handler->handle_, onchange_sym, ARRAY_SIZE(argv), argv);
 }
 
 
@@ -85,7 +83,7 @@ Handle<Value> StatWatcher::Start(const Arguments& args) {
   }
 
   StatWatcher *handler = ObjectWrap::Unwrap<StatWatcher>(args.Holder());
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   assert(handler->path_ == NULL);
   handler->path_ = strdup(*path);
@@ -113,7 +111,10 @@ Handle<Value> StatWatcher::Start(const Arguments& args) {
 Handle<Value> StatWatcher::Stop(const Arguments& args) {
   HandleScope scope;
   StatWatcher *handler = ObjectWrap::Unwrap<StatWatcher>(args.Holder());
-  handler->Emit(stop_symbol, 0, NULL);
+  if (onstop_sym.IsEmpty()) {
+    onstop_sym = NODE_PSYMBOL("onstop");
+  }
+  MakeCallback(handler->handle_, onstop_sym, 0, NULL);
   handler->Stop();
   return Undefined();
 }

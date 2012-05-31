@@ -37,40 +37,20 @@
 #include <sys/select.h>
 #include <pthread.h>
 
-#ifdef __APPLE__
-#include <mach-o/dyld.h> /* _NSGetExecutablePath */
-
-static void get_executable_path() {
-  uint32_t bufsize = sizeof(executable_path);
-  _NSGetExecutablePath(executable_path, &bufsize);
-}
-#endif
-
-#ifdef __linux__
-static void get_executable_path() {
-  if (!executable_path[0]) {
-    readlink("/proc/self/exe", executable_path, PATHMAX - 1);
-  }
-}
-#endif
-
 
 /* Do platform-specific initialization. */
 void platform_init(int argc, char **argv) {
   /* Disable stdio output buffering. */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
-#ifdef get_executable_path
-  get_executable_path();
-#else
   strcpy(executable_path, argv[0]);
-#endif
+  signal(SIGPIPE, SIG_IGN);
 }
 
 
-/* Invoke "arv[0] test-name". Store process info in *p. */
+/* Invoke "argv[0] test-name [test-part]". Store process info in *p. */
 /* Make sure that all stdio output of the processes is buffered up. */
-int process_start(char* name, process_info_t* p) {
+int process_start(char* name, char* part, process_info_t* p) {
   FILE* stdout_file = tmpfile();
   if (!stdout_file) {
     perror("tmpfile");
@@ -92,7 +72,7 @@ int process_start(char* name, process_info_t* p) {
     dup2(fileno(stdout_file), STDOUT_FILENO);
     dup2(fileno(stdout_file), STDERR_FILENO);
 
-    char* args[3] = { executable_path, name, NULL };
+    char* args[] = { executable_path, name, part, NULL };
     execvp(executable_path, args);
     perror("execvp()");
     _exit(127);
@@ -120,13 +100,12 @@ typedef struct {
 static void* dowait(void* data) {
   dowait_args* args = data;
 
-  int i, status, r;
+  int i, r;
   process_info_t* p;
 
   for (i = 0; i < args->n; i++) {
     p = (process_info_t*)(args->vec + i * sizeof(process_info_t));
     if (p->terminated) continue;
-    status = 0;
     r = waitpid(p->pid, &p->status, 0);
     if (r < 0) {
       perror("waitpid");
@@ -248,7 +227,7 @@ int process_copy_output(process_info_t *p, int fd) {
     return -1;
   }
 
-  size_t nread, nwritten;
+  ssize_t nread, nwritten;
   char buf[1024];
 
   while ((nread = read(fileno(p->stdout_file), buf, 1024)) > 0) {
@@ -305,31 +284,7 @@ void rewind_cursor() {
 }
 
 
-typedef void* (*uv_thread_cb)(void* arg);
-
-
-uintptr_t uv_create_thread(void (*entry)(void* arg), void* arg) {
-  pthread_t t;
-  uv_thread_cb cb = (uv_thread_cb)entry;
-  int r = pthread_create(&t, NULL, cb, arg);
-
-  if (r) {
-    return 0;
-  }
-
-  return (uintptr_t)t;
-}
-
-
-/* Wait for a thread to terminate. Should return 0 if the thread ended, -1 on
- * error.
- */
-int uv_wait_thread(uintptr_t thread_id) {
-  return pthread_join((pthread_t)thread_id, NULL);
-}
-
-
 /* Pause the calling thread for a number of milliseconds. */
 void uv_sleep(int msec) {
-  usleep(msec);
+  usleep(msec * 1000);
 }

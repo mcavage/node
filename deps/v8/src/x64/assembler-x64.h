@@ -30,7 +30,7 @@
 
 // The original source code covered by the above license above has been
 // modified significantly by Google Inc.
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 
 // A lightweight X64 Assembler.
 
@@ -45,22 +45,22 @@ namespace internal {
 // Utility functions
 
 // Test whether a 64-bit value is in a specific range.
-static inline bool is_uint32(int64_t x) {
+inline bool is_uint32(int64_t x) {
   static const uint64_t kMaxUInt32 = V8_UINT64_C(0xffffffff);
   return static_cast<uint64_t>(x) <= kMaxUInt32;
 }
 
-static inline bool is_int32(int64_t x) {
+inline bool is_int32(int64_t x) {
   static const int64_t kMinInt32 = -V8_INT64_C(0x80000000);
   return is_uint32(x - kMinInt32);
 }
 
-static inline bool uint_is_int32(uint64_t x) {
+inline bool uint_is_int32(uint64_t x) {
   static const uint64_t kMaxInt32 = V8_UINT64_C(0x7fffffff);
   return x <= kMaxInt32;
 }
 
-static inline bool is_uint32(uint64_t x) {
+inline bool is_uint32(uint64_t x) {
   static const uint64_t kMaxUInt32 = V8_UINT64_C(0xffffffff);
   return x <= kMaxUInt32;
 }
@@ -93,8 +93,8 @@ struct Register {
   //  rbp - frame pointer
   //  rsi - context register
   //  r10 - fixed scratch register
+  //  r12 - smi constant register
   //  r13 - root register
-  //  r15 - smi constant register
   static const int kNumRegisters = 16;
   static const int kNumAllocatableRegisters = 10;
 
@@ -120,17 +120,19 @@ struct Register {
       "r9",
       "r11",
       "r14",
-      "r12"
+      "r15"
     };
     return names[index];
   }
 
-  static Register toRegister(int code) {
+  static Register from_code(int code) {
     Register r = { code };
     return r;
   }
   bool is_valid() const { return 0 <= code_ && code_ < kNumRegisters; }
   bool is(Register reg) const { return code_ == reg.code_; }
+  // rax, rbx, rcx and rdx are byte registers, the rest are not.
+  bool is_byte_register() const { return code_ <= 3; }
   int code() const {
     ASSERT(is_valid());
     return code_;
@@ -159,23 +161,41 @@ struct Register {
   static const int kAllocationIndexByRegisterCode[kNumRegisters];
 };
 
-const Register rax = { 0 };
-const Register rcx = { 1 };
-const Register rdx = { 2 };
-const Register rbx = { 3 };
-const Register rsp = { 4 };
-const Register rbp = { 5 };
-const Register rsi = { 6 };
-const Register rdi = { 7 };
-const Register r8 = { 8 };
-const Register r9 = { 9 };
-const Register r10 = { 10 };
-const Register r11 = { 11 };
-const Register r12 = { 12 };
-const Register r13 = { 13 };
-const Register r14 = { 14 };
-const Register r15 = { 15 };
-const Register no_reg = { -1 };
+const int kRegister_rax_Code = 0;
+const int kRegister_rcx_Code = 1;
+const int kRegister_rdx_Code = 2;
+const int kRegister_rbx_Code = 3;
+const int kRegister_rsp_Code = 4;
+const int kRegister_rbp_Code = 5;
+const int kRegister_rsi_Code = 6;
+const int kRegister_rdi_Code = 7;
+const int kRegister_r8_Code = 8;
+const int kRegister_r9_Code = 9;
+const int kRegister_r10_Code = 10;
+const int kRegister_r11_Code = 11;
+const int kRegister_r12_Code = 12;
+const int kRegister_r13_Code = 13;
+const int kRegister_r14_Code = 14;
+const int kRegister_r15_Code = 15;
+const int kRegister_no_reg_Code = -1;
+
+const Register rax = { kRegister_rax_Code };
+const Register rcx = { kRegister_rcx_Code };
+const Register rdx = { kRegister_rdx_Code };
+const Register rbx = { kRegister_rbx_Code };
+const Register rsp = { kRegister_rsp_Code };
+const Register rbp = { kRegister_rbp_Code };
+const Register rsi = { kRegister_rsi_Code };
+const Register rdi = { kRegister_rdi_Code };
+const Register r8 = { kRegister_r8_Code };
+const Register r9 = { kRegister_r9_Code };
+const Register r10 = { kRegister_r10_Code };
+const Register r11 = { kRegister_r11_Code };
+const Register r12 = { kRegister_r12_Code };
+const Register r13 = { kRegister_r13_Code };
+const Register r14 = { kRegister_r14_Code };
+const Register r15 = { kRegister_r15_Code };
+const Register no_reg = { kRegister_no_reg_Code };
 
 
 struct XMMRegister {
@@ -215,6 +235,12 @@ struct XMMRegister {
     return names[index];
   }
 
+  static XMMRegister from_code(int code) {
+    ASSERT(code >= 0);
+    ASSERT(code < kNumRegisters);
+    XMMRegister r = { code };
+    return r;
+  }
   bool is_valid() const { return 0 <= code_ && code_ < kNumRegisters; }
   bool is(XMMRegister reg) const { return code_ == reg.code_; }
   int code() const {
@@ -327,22 +353,6 @@ inline Condition ReverseCondition(Condition cc) {
 }
 
 
-enum Hint {
-  no_hint = 0,
-  not_taken = 0x2e,
-  taken = 0x3e
-};
-
-// The result of negating a hint is as if the corresponding condition
-// were negated by NegateCondition.  That is, no_hint is mapped to
-// itself and not_taken and taken are mapped to each other.
-inline Hint NegateHint(Hint hint) {
-  return (hint == no_hint)
-      ? no_hint
-      : ((hint == not_taken) ? taken : not_taken);
-}
-
-
 // -----------------------------------------------------------------------------
 // Machine instruction Immediates
 
@@ -395,6 +405,13 @@ class Operand BASE_EMBEDDED {
   // Does not check the "reg" part of the Operand.
   bool AddressUsesRegister(Register reg) const;
 
+  // Queries related to the size of the generated instruction.
+  // Whether the generated instruction will have a REX prefix.
+  bool requires_rex() const { return rex_ != 0; }
+  // Size of the ModR/M, SIB and displacement parts of the generated
+  // instruction.
+  int operand_size() const { return len_; }
+
  private:
   byte rex_;
   byte buf_[6];
@@ -431,9 +448,11 @@ class CpuFeatures : public AllStatic {
  public:
   // Detect features of the target CPU. Set safe defaults if the serializer
   // is enabled (snapshots must be portable).
-  static void Probe(bool portable);
+  static void Probe();
+
   // Check whether a feature is supported by the target CPU.
   static bool IsSupported(CpuFeature f) {
+    ASSERT(initialized_);
     if (f == SSE2 && !FLAG_enable_sse2) return false;
     if (f == SSE3 && !FLAG_enable_sse3) return false;
     if (f == CMOV && !FLAG_enable_cmov) return false;
@@ -441,40 +460,74 @@ class CpuFeatures : public AllStatic {
     if (f == SAHF && !FLAG_enable_sahf) return false;
     return (supported_ & (V8_UINT64_C(1) << f)) != 0;
   }
+
+#ifdef DEBUG
   // Check whether a feature is currently enabled.
   static bool IsEnabled(CpuFeature f) {
-    return (enabled_ & (V8_UINT64_C(1) << f)) != 0;
+    ASSERT(initialized_);
+    Isolate* isolate = Isolate::UncheckedCurrent();
+    if (isolate == NULL) {
+      // When no isolate is available, work as if we're running in
+      // release mode.
+      return IsSupported(f);
+    }
+    uint64_t enabled = isolate->enabled_cpu_features();
+    return (enabled & (V8_UINT64_C(1) << f)) != 0;
   }
+#endif
+
   // Enable a specified feature within a scope.
   class Scope BASE_EMBEDDED {
 #ifdef DEBUG
+
    public:
     explicit Scope(CpuFeature f) {
-      uint64_t mask = (V8_UINT64_C(1) << f);
+      uint64_t mask = V8_UINT64_C(1) << f;
       ASSERT(CpuFeatures::IsSupported(f));
-      ASSERT(!Serializer::enabled() || (found_by_runtime_probing_ & mask) == 0);
-      old_enabled_ = CpuFeatures::enabled_;
-      CpuFeatures::enabled_ |= mask;
+      ASSERT(!Serializer::enabled() ||
+             (CpuFeatures::found_by_runtime_probing_ & mask) == 0);
+      isolate_ = Isolate::UncheckedCurrent();
+      old_enabled_ = 0;
+      if (isolate_ != NULL) {
+        old_enabled_ = isolate_->enabled_cpu_features();
+        isolate_->set_enabled_cpu_features(old_enabled_ | mask);
+      }
     }
-    ~Scope() { CpuFeatures::enabled_ = old_enabled_; }
+    ~Scope() {
+      ASSERT_EQ(Isolate::UncheckedCurrent(), isolate_);
+      if (isolate_ != NULL) {
+        isolate_->set_enabled_cpu_features(old_enabled_);
+      }
+    }
+
    private:
+    Isolate* isolate_;
     uint64_t old_enabled_;
 #else
+
    public:
     explicit Scope(CpuFeature f) {}
 #endif
   };
+
  private:
   // Safe defaults include SSE2 and CMOV for X64. It is always available, if
   // anyone checks, but they shouldn't need to check.
+  // The required user mode extensions in X64 are (from AMD64 ABI Table A.1):
+  //   fpu, tsc, cx8, cmov, mmx, sse, sse2, fxsr, syscall
   static const uint64_t kDefaultCpuFeatures = (1 << SSE2 | 1 << CMOV);
+
+#ifdef DEBUG
+  static bool initialized_;
+#endif
   static uint64_t supported_;
-  static uint64_t enabled_;
   static uint64_t found_by_runtime_probing_;
+
+  DISALLOW_COPY_AND_ASSIGN(CpuFeatures);
 };
 
 
-class Assembler : public Malloced {
+class Assembler : public AssemblerBase {
  private:
   // We check before assembling an instruction that there is sufficient
   // space to write an instruction and its relocation information.
@@ -501,8 +554,11 @@ class Assembler : public Malloced {
   // for code generation and assumes its size to be buffer_size. If the buffer
   // is too small, a fatal error occurs. No deallocation of the buffer is done
   // upon destruction of the assembler.
-  Assembler(void* buffer, int buffer_size);
+  Assembler(Isolate* isolate, void* buffer, int buffer_size);
   ~Assembler();
+
+  // Overrides the default provided by FLAG_debug_code.
+  void set_emit_debug_code(bool value) { emit_debug_code_ = value; }
 
   // GetCode emits any pending (non-emitted) code and fills the descriptor
   // desc. GetCode() is idempotent; it returns the same result if no other
@@ -521,8 +577,8 @@ class Assembler : public Malloced {
 
   // This sets the branch destination (which is in the instruction on x64).
   // This is for calls and branches within generated code.
-  inline static void set_target_at(Address instruction_payload,
-                                   Address target) {
+  inline static void deserialization_set_special_target_at(
+      Address instruction_payload, Address target) {
     set_target_address_at(instruction_payload, target);
   }
 
@@ -535,8 +591,7 @@ class Assembler : public Malloced {
 
   inline Handle<Object> code_target_object_handle_at(Address pc);
   // Number of bytes taken up by the branch target in the code.
-  static const int kCallTargetSize = 4;      // Use 32-bit displacement.
-  static const int kExternalTargetSize = 8;  // Use 64-bit absolute.
+  static const int kSpecialTargetSize = 4;  // Use 32-bit displacement.
   // Distance between the address of the code target in the call instruction
   // and the return address pushed on the stack.
   static const int kCallTargetAddressOffset = 4;  // Use 32-bit displacement.
@@ -574,7 +629,8 @@ class Assembler : public Malloced {
   static const byte kJccShortPrefix = 0x70;
   static const byte kJncShortOpcode = kJccShortPrefix | not_carry;
   static const byte kJcShortOpcode = kJccShortPrefix | carry;
-
+  static const byte kJnzShortOpcode = kJccShortPrefix | not_zero;
+  static const byte kJzShortOpcode = kJccShortPrefix | zero;
 
 
   // ---------------------------------------------------------------------------
@@ -600,6 +656,7 @@ class Assembler : public Malloced {
   // possible to align the pc offset to a multiple
   // of m, where m must be a power of 2.
   void Align(int m);
+  void Nop(int bytes = 1);
   // Aligns code to something that's optimal for a jump target for the platform.
   void CodeTargetAlign();
 
@@ -649,7 +706,7 @@ class Assembler : public Malloced {
 
   // Move sign extended immediate to memory location.
   void movq(const Operand& dst, Immediate value);
-  // New x64 instructions to load a 64-bit immediate into a register.
+  // Instructions to load a 64-bit immediate into a register.
   // All 64-bit immediates must have a relocation mode.
   void movq(Register dst, void* ptr, RelocInfo::Mode rmode);
   void movq(Register dst, int64_t value, RelocInfo::Mode rmode);
@@ -674,7 +731,7 @@ class Assembler : public Malloced {
   void repmovsl();
   void repmovsq();
 
-  // New x64 instruction to load from an immediate 64-bit pointer into RAX.
+  // Instruction to load from an immediate 64-bit pointer into RAX.
   void load_rax(void* ptr, RelocInfo::Mode rmode);
   void load_rax(ExternalReference ext);
 
@@ -702,6 +759,10 @@ class Assembler : public Malloced {
 
   void addl(const Operand& dst, Immediate src) {
     immediate_arithmetic_op_32(0x0, dst, src);
+  }
+
+  void addl(const Operand& dst, Register src) {
+    arithmetic_op_32(0x01, src, dst);
   }
 
   void addq(Register dst, Register src) {
@@ -1109,11 +1170,11 @@ class Assembler : public Malloced {
 
   // Miscellaneous
   void clc();
+  void cld();
   void cpuid();
   void hlt();
   void int3();
   void nop();
-  void nop(int n);
   void rdtsc();
   void ret(int imm16);
   void setcc(Condition cc, Register reg);
@@ -1134,12 +1195,13 @@ class Assembler : public Malloced {
   // but it may be bound only once.
 
   void bind(Label* L);  // binds an unbound label L to the current code position
-  void bind(NearLabel* L);
 
   // Calls
   // Call near relative 32-bit displacement, relative to next instruction.
   void call(Label* L);
-  void call(Handle<Code> target, RelocInfo::Mode rmode);
+  void call(Handle<Code> target,
+            RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+            unsigned ast_id = kNoASTId);
 
   // Calls directly to the given address using a relative offset.
   // Should only ever be used in Code objects for calls within the
@@ -1156,7 +1218,8 @@ class Assembler : public Malloced {
   // Jumps
   // Jump short or near relative.
   // Use a 32-bit signed displacement.
-  void jmp(Label* L);  // unconditional jump to L
+  // Unconditional jump to L
+  void jmp(Label* L, Label::Distance distance = Label::kFar);
   void jmp(Handle<Code> target, RelocInfo::Mode rmode);
 
   // Jump near absolute indirect (r64)
@@ -1165,15 +1228,11 @@ class Assembler : public Malloced {
   // Jump near absolute indirect (m64)
   void jmp(const Operand& src);
 
-  // Short jump
-  void jmp(NearLabel* L);
-
   // Conditional jumps
-  void j(Condition cc, Label* L);
+  void j(Condition cc,
+         Label* L,
+         Label::Distance distance = Label::kFar);
   void j(Condition cc, Handle<Code> target, RelocInfo::Mode rmode);
-
-  // Conditional short jump
-  void j(Condition cc, NearLabel* L, Hint hint = no_hint);
 
   // Floating-point operations
   void fld(int i);
@@ -1236,7 +1295,11 @@ class Assembler : public Malloced {
 
   void fsin();
   void fcos();
+  void fptan();
   void fyl2x();
+  void f2xm1();
+  void fscale();
+  void fninit();
 
   void frndint();
 
@@ -1247,14 +1310,23 @@ class Assembler : public Malloced {
   void movd(Register dst, XMMRegister src);
   void movq(XMMRegister dst, Register src);
   void movq(Register dst, XMMRegister src);
+  void movq(XMMRegister dst, XMMRegister src);
   void extractps(Register dst, XMMRegister src, byte imm8);
 
-  void movsd(const Operand& dst, XMMRegister src);
+  // Don't use this unless it's important to keep the
+  // top half of the destination register unchanged.
+  // Used movaps when moving double values and movq for integer
+  // values in xmm registers.
   void movsd(XMMRegister dst, XMMRegister src);
+
+  void movsd(const Operand& dst, XMMRegister src);
   void movsd(XMMRegister dst, const Operand& src);
 
   void movdqa(const Operand& dst, XMMRegister src);
   void movdqa(XMMRegister dst, const Operand& src);
+
+  void movapd(XMMRegister dst, XMMRegister src);
+  void movaps(XMMRegister dst, XMMRegister src);
 
   void movss(XMMRegister dst, const Operand& src);
   void movss(const Operand& dst, XMMRegister src);
@@ -1287,10 +1359,20 @@ class Assembler : public Malloced {
   void andpd(XMMRegister dst, XMMRegister src);
   void orpd(XMMRegister dst, XMMRegister src);
   void xorpd(XMMRegister dst, XMMRegister src);
+  void xorps(XMMRegister dst, XMMRegister src);
   void sqrtsd(XMMRegister dst, XMMRegister src);
 
   void ucomisd(XMMRegister dst, XMMRegister src);
   void ucomisd(XMMRegister dst, const Operand& src);
+
+  enum RoundingMode {
+    kRoundToNearest = 0x0,
+    kRoundDown      = 0x1,
+    kRoundUp        = 0x2,
+    kRoundToZero    = 0x3
+  };
+
+  void roundsd(XMMRegister dst, XMMRegister src, RoundingMode mode);
 
   void movmskpd(Register dst, XMMRegister src);
 
@@ -1304,7 +1386,9 @@ class Assembler : public Malloced {
   void Print();
 
   // Check the code size generated from label to here.
-  int SizeOfCodeGeneratedSince(Label* l) { return pc_offset() - l->pos(); }
+  int SizeOfCodeGeneratedSince(Label* label) {
+    return pc_offset() - label->pos();
+  }
 
   // Mark address of the ExitJSFrame code.
   void RecordJSReturn();
@@ -1337,16 +1421,20 @@ class Assembler : public Malloced {
     return static_cast<int>(reloc_info_writer.pos() - pc_);
   }
 
-  static bool IsNop(Address addr) { return *addr == 0x90; }
+  static bool IsNop(Address addr);
 
   // Avoid overflows for displacements etc.
   static const int kMaximalBufferSize = 512*MB;
   static const int kMinimalBufferSize = 4*KB;
 
- private:
-  byte* addr_at(int pos)  { return buffer_ + pos; }
   byte byte_at(int pos)  { return buffer_[pos]; }
   void set_byte_at(int pos, byte value) { buffer_[pos] = value; }
+
+ protected:
+  bool emit_debug_code() const { return emit_debug_code_; }
+
+ private:
+  byte* addr_at(int pos)  { return buffer_ + pos; }
   uint32_t long_at(int pos)  {
     return *reinterpret_cast<uint32_t*>(addr_at(pos));
   }
@@ -1361,7 +1449,9 @@ class Assembler : public Malloced {
   inline void emitl(uint32_t x);
   inline void emitq(uint64_t x, RelocInfo::Mode rmode);
   inline void emitw(uint16_t x);
-  inline void emit_code_target(Handle<Code> target, RelocInfo::Mode rmode);
+  inline void emit_code_target(Handle<Code> target,
+                               RelocInfo::Mode rmode,
+                               unsigned ast_id = kNoASTId);
   void emit(Immediate x) { emitl(x.value_); }
 
   // Emits a REX prefix that encodes a 64-bit operand size and
@@ -1536,18 +1626,17 @@ class Assembler : public Malloced {
   int buffer_size_;
   // True if the assembler owns the buffer, false if buffer is external.
   bool own_buffer_;
-  // A previously allocated buffer of kMinimalBufferSize bytes, or NULL.
-  static byte* spare_buffer_;
 
   // code generation
   byte* pc_;  // the program counter; moves forward
   RelocInfoWriter reloc_info_writer;
 
   List< Handle<Code> > code_targets_;
-  // push-pop elimination
-  byte* last_pc_;
 
   PositionsRecorder positions_recorder_;
+
+  bool emit_debug_code_;
+
   friend class PositionsRecorder;
 };
 

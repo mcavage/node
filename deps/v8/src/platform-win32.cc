@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -32,78 +32,11 @@
 
 #include "v8.h"
 
+#include "codegen.h"
 #include "platform.h"
 #include "vm-state-inl.h"
 
-// Extra POSIX/ANSI routines for Win32 when when using Visual Studio C++. Please
-// refer to The Open Group Base Specification for specification of the correct
-// semantics for these functions.
-// (http://www.opengroup.org/onlinepubs/000095399/)
 #ifdef _MSC_VER
-
-namespace v8 {
-namespace internal {
-
-// Test for finite value - usually defined in math.h
-int isfinite(double x) {
-  return _finite(x);
-}
-
-}  // namespace v8
-}  // namespace internal
-
-// Test for a NaN (not a number) value - usually defined in math.h
-int isnan(double x) {
-  return _isnan(x);
-}
-
-
-// Test for infinity - usually defined in math.h
-int isinf(double x) {
-  return (_fpclass(x) & (_FPCLASS_PINF | _FPCLASS_NINF)) != 0;
-}
-
-
-// Test if x is less than y and both nominal - usually defined in math.h
-int isless(double x, double y) {
-  return isnan(x) || isnan(y) ? 0 : x < y;
-}
-
-
-// Test if x is greater than y and both nominal - usually defined in math.h
-int isgreater(double x, double y) {
-  return isnan(x) || isnan(y) ? 0 : x > y;
-}
-
-
-// Classify floating point number - usually defined in math.h
-int fpclassify(double x) {
-  // Use the MS-specific _fpclass() for classification.
-  int flags = _fpclass(x);
-
-  // Determine class. We cannot use a switch statement because
-  // the _FPCLASS_ constants are defined as flags.
-  if (flags & (_FPCLASS_PN | _FPCLASS_NN)) return FP_NORMAL;
-  if (flags & (_FPCLASS_PZ | _FPCLASS_NZ)) return FP_ZERO;
-  if (flags & (_FPCLASS_PD | _FPCLASS_ND)) return FP_SUBNORMAL;
-  if (flags & (_FPCLASS_PINF | _FPCLASS_NINF)) return FP_INFINITE;
-
-  // All cases should be covered by the code above.
-  ASSERT(flags & (_FPCLASS_SNAN | _FPCLASS_QNAN));
-  return FP_NAN;
-}
-
-
-// Test sign - usually defined in math.h
-int signbit(double x) {
-  // We need to take care of the special case of both positive
-  // and negative versions of zero.
-  if (x == 0)
-    return _fpclass(x) & _FPCLASS_NZ;
-  else
-    return x < 0;
-}
-
 
 // Case-insensitive bounded string comparisons. Use stricmp() on Win32. Usually
 // defined in strings.h.
@@ -118,6 +51,22 @@ int strncasecmp(const char* s1, const char* s2, int n) {
 // the Microsoft Visual Studio C++ CRT.
 #ifdef __MINGW32__
 
+
+#ifndef __MINGW64_VERSION_MAJOR
+
+#define _TRUNCATE 0
+#define STRUNCATE 80
+
+inline void MemoryBarrier() {
+  int barrier = 0;
+  __asm__ __volatile__("xchgl %%eax,%0 ":"=r" (barrier));
+}
+
+#endif  // __MINGW64_VERSION_MAJOR
+
+
+#ifndef MINGW_HAS_SECURE_API
+
 int localtime_s(tm* out_tm, const time_t* time) {
   tm* posix_local_time_struct = localtime(time);
   if (posix_local_time_struct == NULL) return 1;
@@ -126,36 +75,45 @@ int localtime_s(tm* out_tm, const time_t* time) {
 }
 
 
-// Not sure this the correct interpretation of _mkgmtime
-time_t _mkgmtime(tm* timeptr) {
-  return mktime(timeptr);
-}
-
-
 int fopen_s(FILE** pFile, const char* filename, const char* mode) {
   *pFile = fopen(filename, mode);
   return *pFile != NULL ? 0 : 1;
 }
 
-
 int _vsnprintf_s(char* buffer, size_t sizeOfBuffer, size_t count,
                  const char* format, va_list argptr) {
+  ASSERT(count == _TRUNCATE);
   return _vsnprintf(buffer, sizeOfBuffer, format, argptr);
 }
-#define _TRUNCATE 0
 
 
-int strncpy_s(char* strDest, size_t numberOfElements,
-              const char* strSource, size_t count) {
-  strncpy(strDest, strSource, count);
+int strncpy_s(char* dest, size_t dest_size, const char* source, size_t count) {
+  CHECK(source != NULL);
+  CHECK(dest != NULL);
+  CHECK_GT(dest_size, 0);
+
+  if (count == _TRUNCATE) {
+    while (dest_size > 0 && *source != 0) {
+      *(dest++) = *(source++);
+      --dest_size;
+    }
+    if (dest_size == 0) {
+      *(dest - 1) = 0;
+      return STRUNCATE;
+    }
+  } else {
+    while (dest_size > 0 && count > 0 && *source != 0) {
+      *(dest++) = *(source++);
+      --dest_size;
+      --count;
+    }
+  }
+  CHECK_GT(dest_size, 0);
+  *dest = 0;
   return 0;
 }
 
-
-inline void MemoryBarrier() {
-  int barrier = 0;
-  __asm__ __volatile__("xchgl %%eax,%0 ":"=r" (barrier));
-}
+#endif  // MINGW_HAS_SECURE_API
 
 #endif  // __MINGW32__
 
@@ -169,19 +127,48 @@ int random() {
 namespace v8 {
 namespace internal {
 
+intptr_t OS::MaxVirtualMemory() {
+  return 0;
+}
+
+
 double ceiling(double x) {
   return ceil(x);
 }
 
+
+static Mutex* limit_mutex = NULL;
+
+#if defined(V8_TARGET_ARCH_IA32)
+static OS::MemCopyFunction memcopy_function = NULL;
+// Defined in codegen-ia32.cc.
+OS::MemCopyFunction CreateMemCopyFunction();
+
+// Copy memory area to disjoint memory area.
+void OS::MemCopy(void* dest, const void* src, size_t size) {
+  // Note: here we rely on dependent reads being ordered. This is true
+  // on all architectures we currently support.
+  (*memcopy_function)(dest, src, size);
+#ifdef DEBUG
+  CHECK_EQ(0, memcmp(dest, src, size));
+#endif
+}
+#endif  // V8_TARGET_ARCH_IA32
+
 #ifdef _WIN64
 typedef double (*ModuloFunction)(double, double);
-
+static ModuloFunction modulo_function = NULL;
 // Defined in codegen-x64.cc.
 ModuloFunction CreateModuloFunction();
 
+void init_modulo_function() {
+  modulo_function = CreateModuloFunction();
+}
+
 double modulo(double x, double y) {
-  static ModuloFunction function = CreateModuloFunction();
-  return function(x, y);
+  // Note: here we rely on dependent reads being ordered. This is true
+  // on all architectures we currently support.
+  return (*modulo_function)(x, y);
 }
 #else  // Win32
 
@@ -198,9 +185,40 @@ double modulo(double x, double y) {
 
 #endif  // _WIN64
 
+
+#define UNARY_MATH_FUNCTION(name, generator)             \
+static UnaryMathFunction fast_##name##_function = NULL;  \
+void init_fast_##name##_function() {                     \
+  fast_##name##_function = generator;                    \
+}                                                        \
+double fast_##name(double x) {                           \
+  return (*fast_##name##_function)(x);                   \
+}
+
+UNARY_MATH_FUNCTION(sin, CreateTranscendentalFunction(TranscendentalCache::SIN))
+UNARY_MATH_FUNCTION(cos, CreateTranscendentalFunction(TranscendentalCache::COS))
+UNARY_MATH_FUNCTION(tan, CreateTranscendentalFunction(TranscendentalCache::TAN))
+UNARY_MATH_FUNCTION(log, CreateTranscendentalFunction(TranscendentalCache::LOG))
+UNARY_MATH_FUNCTION(sqrt, CreateSqrtFunction())
+
+#undef MATH_FUNCTION
+
+
+void MathSetup() {
+#ifdef _WIN64
+  init_modulo_function();
+#endif
+  init_fast_sin_function();
+  init_fast_cos_function();
+  init_fast_tan_function();
+  init_fast_log_function();
+  init_fast_sqrt_function();
+}
+
+
 // ----------------------------------------------------------------------------
 // The Time class represents time on win32. A timestamp is represented as
-// a 64-bit integer in 100 nano-seconds since January 1, 1601 (UTC). JavaScript
+// a 64-bit integer in 100 nanoseconds since January 1, 1601 (UTC). JavaScript
 // timestamps are represented as a doubles in milliseconds since 00:00:00 UTC,
 // January 1, 1970.
 
@@ -369,13 +387,11 @@ void Time::TzSet() {
   }
 
   // Make standard and DST timezone names.
-  OS::SNPrintF(Vector<char>(std_tz_name_, kTzNameSize),
-               "%S",
-               tzinfo_.StandardName);
+  WideCharToMultiByte(CP_UTF8, 0, tzinfo_.StandardName, -1,
+                      std_tz_name_, kTzNameSize, NULL, NULL);
   std_tz_name_[kTzNameSize - 1] = '\0';
-  OS::SNPrintF(Vector<char>(dst_tz_name_, kTzNameSize),
-               "%S",
-               tzinfo_.DaylightName);
+  WideCharToMultiByte(CP_UTF8, 0, tzinfo_.DaylightName, -1,
+                      dst_tz_name_, kTzNameSize, NULL, NULL);
   dst_tz_name_[kTzNameSize - 1] = '\0';
 
   // If OS returned empty string or resource id (like "@tzres.dll,-211")
@@ -444,6 +460,9 @@ void Time::SetToCurrentTime() {
   // Check if we need to resync due to elapsed time.
   needs_resync |= (time_now.t_ - init_time.t_) > kMaxClockElapsedTime;
 
+  // Check if we need to resync due to backwards time change.
+  needs_resync |= time_now.t_ < init_time.t_;
+
   // Resync the clock if necessary.
   if (needs_resync) {
     GetSystemTimeAsFileTime(&init_time.ft_);
@@ -485,11 +504,14 @@ int64_t Time::LocalOffset() {
   // Convert to local time, as struct with fields for day, hour, year, etc.
   tm posix_local_time_struct;
   if (localtime_s(&posix_local_time_struct, &posix_time)) return 0;
-  // Convert local time in struct to POSIX time as if it were a UTC time.
-  time_t local_posix_time = _mkgmtime(&posix_local_time_struct);
-  Time localtime(1000.0 * local_posix_time);
 
-  return localtime.Diff(&rounded_to_second);
+  if (posix_local_time_struct.tm_isdst > 0) {
+    return (tzinfo_.Bias + tzinfo_.DaylightBias) * -kMsPerMinute;
+  } else if (posix_local_time_struct.tm_isdst == 0) {
+    return (tzinfo_.Bias + tzinfo_.StandardBias) * -kMsPerMinute;
+  } else {
+    return tzinfo_.Bias * -kMsPerMinute;
+  }
 }
 
 
@@ -532,14 +554,13 @@ char* Time::LocalTimezone() {
 }
 
 
-void OS::Setup() {
-  // Seed the random number generator.
-  // Convert the current time to a 64-bit integer first, before converting it
-  // to an unsigned. Going directly can cause an overflow and the seed to be
-  // set to all ones. The seed will be identical for different instances that
-  // call this setup code within the same millisecond.
-  uint64_t seed = static_cast<uint64_t>(TimeCurrentMillis());
-  srand(static_cast<unsigned int>(seed));
+void OS::PostSetUp() {
+  // Math functions depend on CPU features therefore they are initialized after
+  // CPU.
+  MathSetup();
+#if defined(V8_TARGET_ARCH_IA32)
+  memcopy_function = CreateMemCopyFunction();
+#endif
 }
 
 
@@ -675,8 +696,26 @@ bool OS::Remove(const char* path) {
 }
 
 
+FILE* OS::OpenTemporaryFile() {
+  // tmpfile_s tries to use the root dir, don't use it.
+  char tempPathBuffer[MAX_PATH];
+  DWORD path_result = 0;
+  path_result = GetTempPathA(MAX_PATH, tempPathBuffer);
+  if (path_result > MAX_PATH || path_result == 0) return NULL;
+  UINT name_result = 0;
+  char tempNameBuffer[MAX_PATH];
+  name_result = GetTempFileNameA(tempPathBuffer, "", 0, tempNameBuffer);
+  if (name_result == 0) return NULL;
+  FILE* result = FOpen(tempNameBuffer, "w+");  // Same mode as tmpfile uses.
+  if (result != NULL) {
+    Remove(tempNameBuffer);  // Delete on close.
+  }
+  return result;
+}
+
+
 // Open log file in binary mode to avoid /n -> /r/n conversion.
-const char* OS::LogFileOpenMode = "wb";
+const char* const OS::LogFileOpenMode = "wb";
 
 
 // Print (debug) message to console.
@@ -749,15 +788,19 @@ char* OS::StrChr(char* str, int c) {
 
 
 void OS::StrNCpy(Vector<char> dest, const char* src, size_t n) {
+  // Use _TRUNCATE or strncpy_s crashes (by design) if buffer is too small.
+  size_t buffer_size = static_cast<size_t>(dest.length());
+  if (n + 1 > buffer_size)  // count for trailing '\0'
+    n = _TRUNCATE;
   int result = strncpy_s(dest.start(), dest.length(), src, n);
   USE(result);
-  ASSERT(result == 0);
+  ASSERT(result == 0 || (n == _TRUNCATE && result == STRUNCATE));
 }
 
 
 // We keep the lowest and highest addresses mapped as a quick way of
 // determining that pointers are outside the heap (used mostly in assertions
-// and verification).  The estimate is conservative, ie, not all addresses in
+// and verification).  The estimate is conservative, i.e., not all addresses in
 // 'allocated' space are actually allocated to our heap.  The range is
 // [lowest, highest), inclusive on the low and and exclusive on the high end.
 static void* lowest_ever_allocated = reinterpret_cast<void*>(-1);
@@ -765,6 +808,9 @@ static void* highest_ever_allocated = reinterpret_cast<void*>(0);
 
 
 static void UpdateAllocatedSpaceLimits(void* address, int size) {
+  ASSERT(limit_mutex != NULL);
+  ScopedLock lock(limit_mutex);
+
   lowest_ever_allocated = Min(lowest_ever_allocated, address);
   highest_ever_allocated =
       Max(highest_ever_allocated,
@@ -809,46 +855,65 @@ size_t OS::AllocateAlignment() {
 }
 
 
+static void* GetRandomAddr() {
+  Isolate* isolate = Isolate::UncheckedCurrent();
+  // Note that the current isolate isn't set up in a call path via
+  // CpuFeatures::Probe. We don't care about randomization in this case because
+  // the code page is immediately freed.
+  if (isolate != NULL) {
+    // The address range used to randomize RWX allocations in OS::Allocate
+    // Try not to map pages into the default range that windows loads DLLs
+    // Use a multiple of 64k to prevent committing unused memory.
+    // Note: This does not guarantee RWX regions will be within the
+    // range kAllocationRandomAddressMin to kAllocationRandomAddressMax
+#ifdef V8_HOST_ARCH_64_BIT
+    static const intptr_t kAllocationRandomAddressMin = 0x0000000080000000;
+    static const intptr_t kAllocationRandomAddressMax = 0x000003FFFFFF0000;
+#else
+    static const intptr_t kAllocationRandomAddressMin = 0x04000000;
+    static const intptr_t kAllocationRandomAddressMax = 0x3FFF0000;
+#endif
+    uintptr_t address = (V8::RandomPrivate(isolate) << kPageSizeBits)
+        | kAllocationRandomAddressMin;
+    address &= kAllocationRandomAddressMax;
+    return reinterpret_cast<void *>(address);
+  }
+  return NULL;
+}
+
+
+static void* RandomizedVirtualAlloc(size_t size, int action, int protection) {
+  LPVOID base = NULL;
+
+  if (protection == PAGE_EXECUTE_READWRITE || protection == PAGE_NOACCESS) {
+    // For exectutable pages try and randomize the allocation address
+    for (size_t attempts = 0; base == NULL && attempts < 3; ++attempts) {
+      base = VirtualAlloc(GetRandomAddr(), size, action, protection);
+    }
+  }
+
+  // After three attempts give up and let the OS find an address to use.
+  if (base == NULL) base = VirtualAlloc(NULL, size, action, protection);
+
+  return base;
+}
+
+
 void* OS::Allocate(const size_t requested,
                    size_t* allocated,
                    bool is_executable) {
-  // The address range used to randomize RWX allocations in OS::Allocate
-  // Try not to map pages into the default range that windows loads DLLs
-  // Use a multiple of 64k to prevent committing unused memory.
-  // Note: This does not guarantee RWX regions will be within the
-  // range kAllocationRandomAddressMin to kAllocationRandomAddressMax
-#ifdef V8_HOST_ARCH_64_BIT
-  static const intptr_t kAllocationRandomAddressMin = 0x0000000080000000;
-  static const intptr_t kAllocationRandomAddressMax = 0x000003FFFFFF0000;
-#else
-  static const intptr_t kAllocationRandomAddressMin = 0x04000000;
-  static const intptr_t kAllocationRandomAddressMax = 0x3FFF0000;
-#endif
-
   // VirtualAlloc rounds allocated size to page size automatically.
   size_t msize = RoundUp(requested, static_cast<int>(GetPageSize()));
-  intptr_t address = 0;
 
   // Windows XP SP2 allows Data Excution Prevention (DEP).
   int prot = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
 
-  // For exectutable pages try and randomize the allocation address
-  if (prot == PAGE_EXECUTE_READWRITE &&
-      msize >= static_cast<size_t>(Page::kPageSize)) {
-    address = (V8::RandomPrivate() << kPageSizeBits)
-      | kAllocationRandomAddressMin;
-    address &= kAllocationRandomAddressMax;
-  }
-
-  LPVOID mbase = VirtualAlloc(reinterpret_cast<void *>(address),
-                              msize,
-                              MEM_COMMIT | MEM_RESERVE,
-                              prot);
-  if (mbase == NULL && address != 0)
-    mbase = VirtualAlloc(NULL, msize, MEM_COMMIT | MEM_RESERVE, prot);
+  LPVOID mbase = RandomizedVirtualAlloc(msize,
+                                        MEM_COMMIT | MEM_RESERVE,
+                                        prot);
 
   if (mbase == NULL) {
-    LOG(StringEvent("OS::Allocate", "VirtualAlloc failed"));
+    LOG(ISOLATE, StringEvent("OS::Allocate", "VirtualAlloc failed"));
     return NULL;
   }
 
@@ -867,23 +932,21 @@ void OS::Free(void* address, const size_t size) {
 }
 
 
-#ifdef ENABLE_HEAP_PROTECTION
-
-void OS::Protect(void* address, size_t size) {
-  // TODO(1240712): VirtualProtect has a return value which is ignored here.
-  DWORD old_protect;
-  VirtualProtect(address, size, PAGE_READONLY, &old_protect);
+intptr_t OS::CommitPageSize() {
+  return 4096;
 }
 
 
-void OS::Unprotect(void* address, size_t size, bool is_executable) {
-  // TODO(1240712): VirtualProtect has a return value which is ignored here.
-  DWORD new_protect = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+void OS::ProtectCode(void* address, const size_t size) {
   DWORD old_protect;
-  VirtualProtect(address, size, new_protect, &old_protect);
+  VirtualProtect(address, size, PAGE_EXECUTE_READ, &old_protect);
 }
 
-#endif
+
+void OS::Guard(void* address, const size_t size) {
+  DWORD oldprotect;
+  VirtualProtect(address, size, PAGE_READONLY | PAGE_GUARD, &oldprotect);
+}
 
 
 void OS::Sleep(int milliseconds) {
@@ -892,15 +955,11 @@ void OS::Sleep(int milliseconds) {
 
 
 void OS::Abort() {
-  if (!IsDebuggerPresent()) {
-#ifdef _MSC_VER
-    // Make the MSVCRT do a silent abort.
-    _set_abort_behavior(0, _WRITE_ABORT_MSG);
-    _set_abort_behavior(0, _CALL_REPORTFAULT);
-#endif  // _MSC_VER
-    abort();
-  } else {
+  if (IsDebuggerPresent() || FLAG_break_on_abort) {
     DebugBreak();
+  } else {
+    // Make the MSVCRT do a silent abort.
+    raise(SIGABRT);
   }
 }
 
@@ -1191,7 +1250,8 @@ static bool LoadSymbols(HANDLE process_handle) {
       if (err != ERROR_MOD_NOT_FOUND &&
           err != ERROR_INVALID_HANDLE) return false;
     }
-    LOG(SharedLibraryEvent(
+    LOG(i::Isolate::Current(),
+        SharedLibraryEvent(
             module_entry.szExePath,
             reinterpret_cast<unsigned int>(module_entry.modBaseAddr),
             reinterpret_cast<unsigned int>(module_entry.modBaseAddr +
@@ -1283,7 +1343,7 @@ int OS::StackWalk(Vector<OS::StackFrame> frames) {
 
     // Try to locate a symbol for this frame.
     DWORD64 symbol_displacement;
-    SmartPointer<IMAGEHLP_SYMBOL64> symbol(
+    SmartArrayPointer<IMAGEHLP_SYMBOL64> symbol(
         NewArray<IMAGEHLP_SYMBOL64>(kStackWalkMaxNameLen));
     if (symbol.is_empty()) return kStackWalkError;  // Out of memory.
     memset(*symbol, 0, sizeof(IMAGEHLP_SYMBOL64) + kStackWalkMaxNameLen);
@@ -1381,38 +1441,108 @@ void OS::ReleaseStore(volatile AtomicWord* ptr, AtomicWord value) {
 }
 
 
-bool VirtualMemory::IsReserved() {
-  return address_ != NULL;
-}
+VirtualMemory::VirtualMemory() : address_(NULL), size_(0) { }
 
 
-VirtualMemory::VirtualMemory(size_t size) {
-  address_ = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
-  size_ = size;
+VirtualMemory::VirtualMemory(size_t size)
+    : address_(ReserveRegion(size)), size_(size) { }
+
+
+VirtualMemory::VirtualMemory(size_t size, size_t alignment)
+    : address_(NULL), size_(0) {
+  ASSERT(IsAligned(alignment, static_cast<intptr_t>(OS::AllocateAlignment())));
+  size_t request_size = RoundUp(size + alignment,
+                                static_cast<intptr_t>(OS::AllocateAlignment()));
+  void* address = ReserveRegion(request_size);
+  if (address == NULL) return;
+  Address base = RoundUp(static_cast<Address>(address), alignment);
+  // Try reducing the size by freeing and then reallocating a specific area.
+  bool result = ReleaseRegion(address, request_size);
+  USE(result);
+  ASSERT(result);
+  address = VirtualAlloc(base, size, MEM_RESERVE, PAGE_NOACCESS);
+  if (address != NULL) {
+    request_size = size;
+    ASSERT(base == static_cast<Address>(address));
+  } else {
+    // Resizing failed, just go with a bigger area.
+    address = ReserveRegion(request_size);
+    if (address == NULL) return;
+  }
+  address_ = address;
+  size_ = request_size;
 }
 
 
 VirtualMemory::~VirtualMemory() {
   if (IsReserved()) {
-    if (0 == VirtualFree(address(), 0, MEM_RELEASE)) address_ = NULL;
+    bool result = ReleaseRegion(address_, size_);
+    ASSERT(result);
+    USE(result);
   }
 }
 
 
-bool VirtualMemory::Commit(void* address, size_t size, bool is_executable) {
-  int prot = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
-  if (NULL == VirtualAlloc(address, size, MEM_COMMIT, prot)) {
-    return false;
-  }
+bool VirtualMemory::IsReserved() {
+  return address_ != NULL;
+}
 
-  UpdateAllocatedSpaceLimits(address, static_cast<int>(size));
-  return true;
+
+void VirtualMemory::Reset() {
+  address_ = NULL;
+  size_ = 0;
+}
+
+
+bool VirtualMemory::Commit(void* address, size_t size, bool is_executable) {
+  if (CommitRegion(address, size, is_executable)) {
+    UpdateAllocatedSpaceLimits(address, static_cast<int>(size));
+    return true;
+  }
+  return false;
 }
 
 
 bool VirtualMemory::Uncommit(void* address, size_t size) {
   ASSERT(IsReserved());
-  return VirtualFree(address, size, MEM_DECOMMIT) != false;
+  return UncommitRegion(address, size);
+}
+
+
+void* VirtualMemory::ReserveRegion(size_t size) {
+  return RandomizedVirtualAlloc(size, MEM_RESERVE, PAGE_NOACCESS);
+}
+
+
+bool VirtualMemory::CommitRegion(void* base, size_t size, bool is_executable) {
+  int prot = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+  if (NULL == VirtualAlloc(base, size, MEM_COMMIT, prot)) {
+    return false;
+  }
+
+  UpdateAllocatedSpaceLimits(base, static_cast<int>(size));
+  return true;
+}
+
+
+bool VirtualMemory::Guard(void* address) {
+  if (NULL == VirtualAlloc(address,
+                           OS::CommitPageSize(),
+                           MEM_COMMIT,
+                           PAGE_READONLY | PAGE_GUARD)) {
+    return false;
+  }
+  return true;
+}
+
+
+bool VirtualMemory::UncommitRegion(void* base, size_t size) {
+  return VirtualFree(base, size, MEM_DECOMMIT) != 0;
+}
+
+
+bool VirtualMemory::ReleaseRegion(void* base, size_t size) {
+  return VirtualFree(base, 0, MEM_RELEASE) != 0;
 }
 
 
@@ -1421,24 +1551,6 @@ bool VirtualMemory::Uncommit(void* address, size_t size) {
 
 // Definition of invalid thread handle and id.
 static const HANDLE kNoThread = INVALID_HANDLE_VALUE;
-static const DWORD kNoThreadId = 0;
-
-
-class ThreadHandle::PlatformData : public Malloced {
- public:
-  explicit PlatformData(ThreadHandle::Kind kind) {
-    Initialize(kind);
-  }
-
-  void Initialize(ThreadHandle::Kind kind) {
-    switch (kind) {
-      case ThreadHandle::SELF: tid_ = GetCurrentThreadId(); break;
-      case ThreadHandle::INVALID: tid_ = kNoThreadId; break;
-    }
-  }
-  DWORD tid_;  // Win32 thread identifier.
-};
-
 
 // Entry point for threads. The supplied argument is a pointer to the thread
 // object. The entry function dispatches to the run method in the thread
@@ -1446,40 +1558,8 @@ class ThreadHandle::PlatformData : public Malloced {
 // convention.
 static unsigned int __stdcall ThreadEntry(void* arg) {
   Thread* thread = reinterpret_cast<Thread*>(arg);
-  // This is also initialized by the last parameter to _beginthreadex() but we
-  // don't know which thread will run first (the original thread or the new
-  // one) so we initialize it here too.
-  thread->thread_handle_data()->tid_ = GetCurrentThreadId();
   thread->Run();
   return 0;
-}
-
-
-// Initialize thread handle to invalid handle.
-ThreadHandle::ThreadHandle(ThreadHandle::Kind kind) {
-  data_ = new PlatformData(kind);
-}
-
-
-ThreadHandle::~ThreadHandle() {
-  delete data_;
-}
-
-
-// The thread is running if it has the same id as the current thread.
-bool ThreadHandle::IsSelf() const {
-  return GetCurrentThreadId() == data_->tid_;
-}
-
-
-// Test for invalid thread handle.
-bool ThreadHandle::IsValid() const {
-  return data_->tid_ != kNoThreadId;
-}
-
-
-void ThreadHandle::Initialize(ThreadHandle::Kind kind) {
-  data_->Initialize(kind);
 }
 
 
@@ -1487,21 +1567,17 @@ class Thread::PlatformData : public Malloced {
  public:
   explicit PlatformData(HANDLE thread) : thread_(thread) {}
   HANDLE thread_;
+  unsigned thread_id_;
 };
 
 
 // Initialize a Win32 thread object. The thread has an invalid thread
 // handle until it is started.
 
-Thread::Thread() : ThreadHandle(ThreadHandle::INVALID) {
+Thread::Thread(const Options& options)
+    : stack_size_(options.stack_size()) {
   data_ = new PlatformData(kNoThread);
-  set_name("v8:<unknown>");
-}
-
-
-Thread::Thread(const char* name) : ThreadHandle(ThreadHandle::INVALID) {
-  data_ = new PlatformData(kNoThread);
-  set_name(name);
+  set_name(options.name());
 }
 
 
@@ -1524,19 +1600,19 @@ Thread::~Thread() {
 void Thread::Start() {
   data_->thread_ = reinterpret_cast<HANDLE>(
       _beginthreadex(NULL,
-                     0,
+                     static_cast<unsigned>(stack_size_),
                      ThreadEntry,
                      this,
                      0,
-                     reinterpret_cast<unsigned int*>(
-                         &thread_handle_data()->tid_)));
-  ASSERT(IsValid());
+                     &data_->thread_id_));
 }
 
 
 // Wait for thread to terminate.
 void Thread::Join() {
-  WaitForSingleObject(data_->thread_, INFINITE);
+  if (data_->thread_id_ != GetCurrentThreadId()) {
+    WaitForSingleObject(data_->thread_, INFINITE);
+  }
 }
 
 
@@ -1582,7 +1658,6 @@ void Thread::YieldCPU() {
 
 class Win32Mutex : public Mutex {
  public:
-
   Win32Mutex() { InitializeCriticalSection(&cs_); }
 
   virtual ~Win32Mutex() { DeleteCriticalSection(&cs_); }
@@ -1792,7 +1867,7 @@ bool Win32Socket::SetReuseAddress(bool reuse_address) {
 }
 
 
-bool Socket::Setup() {
+bool Socket::SetUp() {
   // Initialize Winsock32
   int err;
   WSADATA winsock_data;
@@ -1836,139 +1911,204 @@ Socket* OS::CreateSocket() {
 }
 
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-
 // ----------------------------------------------------------------------------
 // Win32 profiler support.
-//
-// On win32 we use a sampler thread with high priority to sample the program
-// counter for the profiled thread.
 
 class Sampler::PlatformData : public Malloced {
  public:
-  explicit PlatformData(Sampler* sampler) {
-    sampler_ = sampler;
-    sampler_thread_ = INVALID_HANDLE_VALUE;
-    profiled_thread_ = INVALID_HANDLE_VALUE;
-  }
-
-  Sampler* sampler_;
-  HANDLE sampler_thread_;
-  HANDLE profiled_thread_;
-  RuntimeProfilerRateLimiter rate_limiter_;
-
-  // Sampler thread handler.
-  void Runner() {
-    while (sampler_->IsActive()) {
-      if (rate_limiter_.SuspendIfNecessary()) continue;
-      Sample();
-      Sleep(sampler_->interval_);
-    }
-  }
-
-  void Sample() {
-    if (sampler_->IsProfiling()) {
-      // Context used for sampling the register state of the profiled thread.
-      CONTEXT context;
-      memset(&context, 0, sizeof(context));
-
-      TickSample sample_obj;
-      TickSample* sample = CpuProfiler::TickSampleEvent();
-      if (sample == NULL) sample = &sample_obj;
-
-      static const DWORD kSuspendFailed = static_cast<DWORD>(-1);
-      if (SuspendThread(profiled_thread_) == kSuspendFailed) return;
-      sample->state = Top::current_vm_state();
-
-      context.ContextFlags = CONTEXT_FULL;
-      if (GetThreadContext(profiled_thread_, &context) != 0) {
-#if V8_HOST_ARCH_X64
-        sample->pc = reinterpret_cast<Address>(context.Rip);
-        sample->sp = reinterpret_cast<Address>(context.Rsp);
-        sample->fp = reinterpret_cast<Address>(context.Rbp);
-#else
-        sample->pc = reinterpret_cast<Address>(context.Eip);
-        sample->sp = reinterpret_cast<Address>(context.Esp);
-        sample->fp = reinterpret_cast<Address>(context.Ebp);
-#endif
-        sampler_->SampleStack(sample);
-        sampler_->Tick(sample);
-      }
-      ResumeThread(profiled_thread_);
-    }
-    if (RuntimeProfiler::IsEnabled()) RuntimeProfiler::NotifyTick();
-  }
-};
-
-
-// Entry point for sampler thread.
-static unsigned int __stdcall SamplerEntry(void* arg) {
-  Sampler::PlatformData* data =
-      reinterpret_cast<Sampler::PlatformData*>(arg);
-  data->Runner();
-  return 0;
-}
-
-
-// Initialize a profile sampler.
-Sampler::Sampler(int interval)
-    : interval_(interval),
-      profiling_(false),
-      active_(false),
-      samples_taken_(0) {
-  data_ = new PlatformData(this);
-}
-
-
-Sampler::~Sampler() {
-  delete data_;
-}
-
-
-// Start profiling.
-void Sampler::Start() {
-  // Do not start multiple threads for the same sampler.
-  ASSERT(!IsActive());
-
   // Get a handle to the calling thread. This is the thread that we are
   // going to profile. We need to make a copy of the handle because we are
   // going to use it in the sampler thread. Using GetThreadHandle() will
   // not work in this case. We're using OpenThread because DuplicateHandle
   // for some reason doesn't work in Chrome's sandbox.
-  data_->profiled_thread_ = OpenThread(THREAD_GET_CONTEXT |
-                                       THREAD_SUSPEND_RESUME |
-                                       THREAD_QUERY_INFORMATION,
-                                       false,
-                                       GetCurrentThreadId());
-  BOOL ok = data_->profiled_thread_ != NULL;
-  if (!ok) return;
+  PlatformData() : profiled_thread_(OpenThread(THREAD_GET_CONTEXT |
+                                               THREAD_SUSPEND_RESUME |
+                                               THREAD_QUERY_INFORMATION,
+                                               false,
+                                               GetCurrentThreadId())) {}
 
-  // Start sampler thread.
-  unsigned int tid;
+  ~PlatformData() {
+    if (profiled_thread_ != NULL) {
+      CloseHandle(profiled_thread_);
+      profiled_thread_ = NULL;
+    }
+  }
+
+  HANDLE profiled_thread() { return profiled_thread_; }
+
+ private:
+  HANDLE profiled_thread_;
+};
+
+
+class SamplerThread : public Thread {
+ public:
+  static const int kSamplerThreadStackSize = 64 * KB;
+
+  explicit SamplerThread(int interval)
+      : Thread(Thread::Options("SamplerThread", kSamplerThreadStackSize)),
+        interval_(interval) {}
+
+  static void SetUp() { if (!mutex_) mutex_ = OS::CreateMutex(); }
+  static void TearDown() { delete mutex_; }
+
+  static void AddActiveSampler(Sampler* sampler) {
+    ScopedLock lock(mutex_);
+    SamplerRegistry::AddActiveSampler(sampler);
+    if (instance_ == NULL) {
+      instance_ = new SamplerThread(sampler->interval());
+      instance_->Start();
+    } else {
+      ASSERT(instance_->interval_ == sampler->interval());
+    }
+  }
+
+  static void RemoveActiveSampler(Sampler* sampler) {
+    ScopedLock lock(mutex_);
+    SamplerRegistry::RemoveActiveSampler(sampler);
+    if (SamplerRegistry::GetState() == SamplerRegistry::HAS_NO_SAMPLERS) {
+      RuntimeProfiler::StopRuntimeProfilerThreadBeforeShutdown(instance_);
+      delete instance_;
+      instance_ = NULL;
+    }
+  }
+
+  // Implement Thread::Run().
+  virtual void Run() {
+    SamplerRegistry::State state;
+    while ((state = SamplerRegistry::GetState()) !=
+           SamplerRegistry::HAS_NO_SAMPLERS) {
+      bool cpu_profiling_enabled =
+          (state == SamplerRegistry::HAS_CPU_PROFILING_SAMPLERS);
+      bool runtime_profiler_enabled = RuntimeProfiler::IsEnabled();
+      // When CPU profiling is enabled both JavaScript and C++ code is
+      // profiled. We must not suspend.
+      if (!cpu_profiling_enabled) {
+        if (rate_limiter_.SuspendIfNecessary()) continue;
+      }
+      if (cpu_profiling_enabled) {
+        if (!SamplerRegistry::IterateActiveSamplers(&DoCpuProfile, this)) {
+          return;
+        }
+      }
+      if (runtime_profiler_enabled) {
+        if (!SamplerRegistry::IterateActiveSamplers(&DoRuntimeProfile, NULL)) {
+          return;
+        }
+      }
+      OS::Sleep(interval_);
+    }
+  }
+
+  static void DoCpuProfile(Sampler* sampler, void* raw_sampler_thread) {
+    if (!sampler->isolate()->IsInitialized()) return;
+    if (!sampler->IsProfiling()) return;
+    SamplerThread* sampler_thread =
+        reinterpret_cast<SamplerThread*>(raw_sampler_thread);
+    sampler_thread->SampleContext(sampler);
+  }
+
+  static void DoRuntimeProfile(Sampler* sampler, void* ignored) {
+    if (!sampler->isolate()->IsInitialized()) return;
+    sampler->isolate()->runtime_profiler()->NotifyTick();
+  }
+
+  void SampleContext(Sampler* sampler) {
+    HANDLE profiled_thread = sampler->platform_data()->profiled_thread();
+    if (profiled_thread == NULL) return;
+
+    // Context used for sampling the register state of the profiled thread.
+    CONTEXT context;
+    memset(&context, 0, sizeof(context));
+
+    TickSample sample_obj;
+    TickSample* sample = CpuProfiler::TickSampleEvent(sampler->isolate());
+    if (sample == NULL) sample = &sample_obj;
+
+    static const DWORD kSuspendFailed = static_cast<DWORD>(-1);
+    if (SuspendThread(profiled_thread) == kSuspendFailed) return;
+    sample->state = sampler->isolate()->current_vm_state();
+
+    context.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(profiled_thread, &context) != 0) {
+#if V8_HOST_ARCH_X64
+      sample->pc = reinterpret_cast<Address>(context.Rip);
+      sample->sp = reinterpret_cast<Address>(context.Rsp);
+      sample->fp = reinterpret_cast<Address>(context.Rbp);
+#else
+      sample->pc = reinterpret_cast<Address>(context.Eip);
+      sample->sp = reinterpret_cast<Address>(context.Esp);
+      sample->fp = reinterpret_cast<Address>(context.Ebp);
+#endif
+      sampler->SampleStack(sample);
+      sampler->Tick(sample);
+    }
+    ResumeThread(profiled_thread);
+  }
+
+  const int interval_;
+  RuntimeProfilerRateLimiter rate_limiter_;
+
+  // Protects the process wide state below.
+  static Mutex* mutex_;
+  static SamplerThread* instance_;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(SamplerThread);
+};
+
+
+Mutex* SamplerThread::mutex_ = NULL;
+SamplerThread* SamplerThread::instance_ = NULL;
+
+
+void OS::SetUp() {
+  // Seed the random number generator.
+  // Convert the current time to a 64-bit integer first, before converting it
+  // to an unsigned. Going directly can cause an overflow and the seed to be
+  // set to all ones. The seed will be identical for different instances that
+  // call this setup code within the same millisecond.
+  uint64_t seed = static_cast<uint64_t>(TimeCurrentMillis());
+  srand(static_cast<unsigned int>(seed));
+  limit_mutex = CreateMutex();
+  SamplerThread::SetUp();
+}
+
+
+void OS::TearDown() {
+  SamplerThread::TearDown();
+  delete limit_mutex;
+}
+
+
+Sampler::Sampler(Isolate* isolate, int interval)
+    : isolate_(isolate),
+      interval_(interval),
+      profiling_(false),
+      active_(false),
+      samples_taken_(0) {
+  data_ = new PlatformData;
+}
+
+
+Sampler::~Sampler() {
+  ASSERT(!IsActive());
+  delete data_;
+}
+
+
+void Sampler::Start() {
+  ASSERT(!IsActive());
   SetActive(true);
-  data_->sampler_thread_ = reinterpret_cast<HANDLE>(
-      _beginthreadex(NULL, 0, SamplerEntry, data_, 0, &tid));
-  // Set thread to high priority to increase sampling accuracy.
-  SetThreadPriority(data_->sampler_thread_, THREAD_PRIORITY_TIME_CRITICAL);
+  SamplerThread::AddActiveSampler(this);
 }
 
 
-// Stop profiling.
 void Sampler::Stop() {
-  // Seting active to false triggers termination of the sampler
-  // thread.
+  ASSERT(IsActive());
+  SamplerThread::RemoveActiveSampler(this);
   SetActive(false);
-
-  // Wait for sampler thread to terminate.
-  Top::WakeUpRuntimeProfilerThreadBeforeShutdown();
-  WaitForSingleObject(data_->sampler_thread_, INFINITE);
-
-  // Release the thread handles
-  CloseHandle(data_->sampler_thread_);
-  CloseHandle(data_->profiled_thread_);
 }
 
-
-#endif  // ENABLE_LOGGING_AND_PROFILING
 
 } }  // namespace v8::internal

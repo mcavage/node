@@ -1,12 +1,12 @@
-## process
+# process
+
+<!-- type=global -->
 
 The `process` object is a global object and can be accessed from anywhere.
 It is an instance of `EventEmitter`.
 
 
-### Event: 'exit'
-
-`function () {}`
+## Event: 'exit'
 
 Emitted when the process is about to exit.  This is a good hook to perform
 constant time checks of the module's state (like for unit tests).  The main
@@ -22,9 +22,7 @@ Example of listening for `exit`:
       console.log('About to exit.');
     });
 
-### Event: 'uncaughtException'
-
-`function (err) { }`
+## Event: 'uncaughtException'
 
 Emitted when an exception bubbles all the way back to the event loop. If a
 listener is added for this exception, the default action (which is to print
@@ -50,9 +48,10 @@ your program's flow.  Especially for server programs that are designed to
 stay running forever, `uncaughtException` can be a useful safety mechanism.
 
 
-### Signal Events
+## Signal Events
 
-`function () {}`
+<!--type=event-->
+<!--name=SIGINT, SIGUSR1, etc.-->
 
 Emitted when the processes receives a signal. See sigaction(2) for a list of
 standard POSIX signal names such as SIGINT, SIGUSR1, etc.
@@ -70,7 +69,7 @@ An easy way to send the `SIGINT` signal is with `Control-C` in most terminal
 programs.
 
 
-### process.stdout
+## process.stdout
 
 A `Writable Stream` to `stdout`.
 
@@ -80,13 +79,23 @@ Example: the definition of `console.log`
       process.stdout.write(d + '\n');
     };
 
+`process.stderr` and `process.stdout` are unlike other streams in Node in
+that writes to them are usually blocking.  They are blocking in the case
+that they refer to regular files or TTY file descriptors. In the case they
+refer to pipes, they are non-blocking like other streams.
 
-### process.stderr
 
-A writable stream to stderr. Writes on this stream are blocking.
+## process.stderr
+
+A writable stream to stderr.
+
+`process.stderr` and `process.stdout` are unlike other streams in Node in
+that writes to them are usually blocking.  They are blocking in the case
+that they refer to regular files or TTY file descriptors. In the case they
+refer to pipes, they are non-blocking like other streams.
 
 
-### process.stdin
+## process.stdin
 
 A `Readable Stream` for stdin. The stdin stream is paused by default, so one
 must call `process.stdin.resume()` to read from it.
@@ -105,7 +114,7 @@ Example of opening standard input and listening for both events:
     });
 
 
-### process.argv
+## process.argv
 
 An array containing the command line arguments.  The first element will be
 'node', the second element will be the name of the JavaScript file.  The
@@ -126,7 +135,7 @@ This will generate:
     4: four
 
 
-### process.execPath
+## process.execPath
 
 This is the absolute pathname of the executable that started the process.
 
@@ -135,7 +144,12 @@ Example:
     /usr/local/bin/node
 
 
-### process.chdir(directory)
+## process.abort()
+
+This causes node to emit an abort. This will cause node to exit and
+generate a core file.
+
+## process.chdir(directory)
 
 Changes the current working directory of the process or throws an exception if that fails.
 
@@ -150,19 +164,19 @@ Changes the current working directory of the process or throws an exception if t
 
 
 
-### process.cwd()
+## process.cwd()
 
 Returns the current working directory of the process.
 
     console.log('Current directory: ' + process.cwd());
 
 
-### process.env
+## process.env
 
 An object containing the user environment. See environ(7).
 
 
-### process.exit(code=0)
+## process.exit([code])
 
 Ends the process with the specified `code`.  If omitted, exit uses the
 'success' code `0`.
@@ -174,68 +188,126 @@ To exit with a 'failure' code:
 The shell that executed node should see the exit code as 1.
 
 
-### process.getgid()
+## process.getgid()
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
 
 Gets the group identity of the process. (See getgid(2).)
 This is the numerical group id, not the group name.
 
-    console.log('Current gid: ' + process.getgid());
+    if (process.getgid) {
+      console.log('Current gid: ' + process.getgid());
+    }
 
 
-### process.setgid(id)
+## process.setgid(id)
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
 
 Sets the group identity of the process. (See setgid(2).)  This accepts either
 a numerical ID or a groupname string. If a groupname is specified, this method
 blocks while resolving it to a numerical ID.
 
-    console.log('Current gid: ' + process.getgid());
-    try {
-      process.setgid(501);
-      console.log('New gid: ' + process.getgid());
-    }
-    catch (err) {
-      console.log('Failed to set gid: ' + err);
+    if (process.getgid && process.setgid) {
+      console.log('Current gid: ' + process.getgid());
+      try {
+        process.setgid(501);
+        console.log('New gid: ' + process.getgid());
+      }
+      catch (err) {
+        console.log('Failed to set gid: ' + err);
+      }
     }
 
 
-### process.getuid()
+## process.getuid()
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
 
 Gets the user identity of the process. (See getuid(2).)
 This is the numerical userid, not the username.
 
-    console.log('Current uid: ' + process.getuid());
+    if (process.getuid) {
+      console.log('Current uid: ' + process.getuid());
+    }
 
 
-### process.setuid(id)
+## process.setuid(id)
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
 
 Sets the user identity of the process. (See setuid(2).)  This accepts either
 a numerical ID or a username string.  If a username is specified, this method
 blocks while resolving it to a numerical ID.
 
-    console.log('Current uid: ' + process.getuid());
-    try {
-      process.setuid(501);
-      console.log('New uid: ' + process.getuid());
-    }
-    catch (err) {
-      console.log('Failed to set uid: ' + err);
+    if (process.getuid && process.setuid) {
+      console.log('Current uid: ' + process.getuid());
+      try {
+        process.setuid(501);
+        console.log('New uid: ' + process.getuid());
+      }
+      catch (err) {
+        console.log('Failed to set uid: ' + err);
+      }
     }
 
 
-### process.version
+## process.version
 
 A compiled-in property that exposes `NODE_VERSION`.
 
     console.log('Version: ' + process.version);
 
-### process.installPrefix
+## process.versions
+
+A property exposing version strings of node and its dependencies.
+
+    console.log(process.versions);
+
+Will output:
+
+    { node: '0.4.12',
+      v8: '3.1.8.26',
+      ares: '1.7.4',
+      ev: '4.4',
+      openssl: '1.0.0e-fips' }
+
+## process.config
+
+An Object containing the JavaScript representation of the configure options
+that were used to compile the current node executable. This is the same as
+the "config.gypi" file that was produced when running the `./configure` script.
+
+An example of the possible output looks like:
+
+    { target_defaults:
+       { cflags: [],
+         default_configuration: 'Release',
+         defines: [],
+         include_dirs: [],
+         libraries: [] },
+      variables:
+       { host_arch: 'x64',
+         node_install_npm: 'true',
+         node_install_waf: 'true',
+         node_prefix: '',
+         node_shared_v8: 'false',
+         node_shared_zlib: 'false',
+         node_use_dtrace: 'false',
+         node_use_openssl: 'true',
+         node_use_system_openssl: 'false',
+         strict_aliasing: 'true',
+         target_arch: 'x64',
+         v8_use_snapshot: 'true' } }
+
+## process.installPrefix
 
 A compiled-in property that exposes `NODE_PREFIX`.
 
     console.log('Prefix: ' + process.installPrefix);
 
 
-### process.kill(pid, signal='SIGTERM')
+## process.kill(pid, [signal])
 
 Send a signal to a process. `pid` is the process id and `signal` is the
 string describing the signal to send.  Signal names are strings like
@@ -260,34 +332,36 @@ Example of sending a signal to yourself:
     process.kill(process.pid, 'SIGHUP');
 
 
-### process.pid
+## process.pid
 
 The PID of the process.
 
     console.log('This process is pid ' + process.pid);
 
-### process.title
+## process.title
 
 Getter/setter to set what is displayed in 'ps'.
 
 
-### process.arch
+## process.arch
 
 What processor architecture you're running on: `'arm'`, `'ia32'`, or `'x64'`.
 
     console.log('This processor architecture is ' + process.arch);
 
 
-### process.platform
+## process.platform
 
-What platform you're running on. `'linux2'`, `'darwin'`, etc.
+What platform you're running on:
+`'darwin'`, `'freebsd'`, `'linux'`, `'solaris'` or `'win32'`
 
     console.log('This platform is ' + process.platform);
 
 
-### process.memoryUsage()
+## process.memoryUsage()
 
-Returns an object describing the memory usage of the Node process.
+Returns an object describing the memory usage of the Node process
+measured in bytes.
 
     var util = require('util');
 
@@ -296,14 +370,13 @@ Returns an object describing the memory usage of the Node process.
 This will generate:
 
     { rss: 4935680,
-      vsize: 41893888,
       heapTotal: 1826816,
       heapUsed: 650472 }
 
 `heapTotal` and `heapUsed` refer to V8's memory usage.
 
 
-### process.nextTick(callback)
+## process.nextTick(callback)
 
 On the next loop around the event loop call this callback.
 This is *not* a simple alias to `setTimeout(fn, 0)`, it's much more
@@ -314,7 +387,7 @@ efficient.
     });
 
 
-### process.umask([mask])
+## process.umask([mask])
 
 Sets or reads the process's file mode creation mask. Child processes inherit
 the mask from the parent process. Returns the old mask if `mask` argument is
@@ -327,6 +400,28 @@ given, otherwise returns the current mask.
                 ' to ' + newmask.toString(8));
 
 
-### process.uptime()
+## process.uptime()
 
 Number of seconds Node has been running.
+
+
+## process.hrtime()
+
+Returns the current high-resolution real time in a `[seconds, nanoseconds]`
+tuple Array. It is relative to an arbitrary time in the past. It is not
+related to the time of day and therefore not subject to clock drift. The
+primary use is for measuring performance between intervals.
+
+You may pass in the result of a previous call to `process.hrtime()` to get
+a diff reading, useful for benchmarks and measuring intervals:
+
+    var t = process.hrtime();
+    // [ 1800216, 927643717 ]
+
+    setTimeout(function () {
+      t = process.hrtime(t);
+      // [ 1, 6962306 ]
+
+      console.log('benchmark took %d seconds and %d nanoseconds', t[0], t[1]);
+      // benchmark took 1 seconds and 6962306 nanoseconds
+    }, 1000);

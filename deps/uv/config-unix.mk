@@ -18,40 +18,154 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-CC = $(PREFIX)gcc
-AR = $(PREFIX)ar
 E=
-CFLAGS=--std=gnu89 -pedantic -Wno-variadic-macros -g -DEV_MULTIPLICITY=0
+CSTDFLAG=--std=c89 -pedantic -Wall -Wextra -Wno-unused-parameter
+CFLAGS += -g
+CPPFLAGS += -Isrc -Isrc/unix/ev
 LINKFLAGS=-lm
 
+CPPFLAGS += -D_LARGEFILE_SOURCE
+CPPFLAGS += -D_FILE_OFFSET_BITS=64
+
+OBJS += src/unix/async.o
+OBJS += src/unix/core.o
+OBJS += src/unix/dl.o
+OBJS += src/unix/error.o
+OBJS += src/unix/fs.o
+OBJS += src/unix/loop.o
+OBJS += src/unix/loop-watcher.o
+OBJS += src/unix/pipe.o
+OBJS += src/unix/poll.o
+OBJS += src/unix/process.o
+OBJS += src/unix/stream.o
+OBJS += src/unix/tcp.o
+OBJS += src/unix/thread.o
+OBJS += src/unix/timer.o
+OBJS += src/unix/tty.o
+OBJS += src/unix/udp.o
+
 ifeq (SunOS,$(uname_S))
-LINKFLAGS+=-lsocket -lnsl
+EV_CONFIG=config_sunos.h
+EIO_CONFIG=config_sunos.h
+CPPFLAGS += -Isrc/ares/config_sunos -D__EXTENSIONS__ -D_XOPEN_SOURCE=500
+LINKFLAGS+=-lsocket -lnsl -lkstat
+OBJS += src/unix/sunos.o
+endif
+
+ifeq (Darwin,$(uname_S))
+EV_CONFIG=config_darwin.h
+EIO_CONFIG=config_darwin.h
+CPPFLAGS += -D_DARWIN_USE_64_BIT_INODE=1 -Isrc/ares/config_darwin
+LINKFLAGS+=-framework CoreServices
+OBJS += src/unix/darwin.o
+OBJS += src/unix/kqueue.o
+endif
+
+ifeq (Linux,$(uname_S))
+EV_CONFIG=config_linux.h
+EIO_CONFIG=config_linux.h
+CSTDFLAG += -D_GNU_SOURCE
+CPPFLAGS += -Isrc/ares/config_linux
+LINKFLAGS+=-ldl -lrt
+OBJS += src/unix/linux/core.o src/unix/linux/inotify.o src/unix/linux/syscalls.o
+endif
+
+ifeq (FreeBSD,$(uname_S))
+EV_CONFIG=config_freebsd.h
+EIO_CONFIG=config_freebsd.h
+CPPFLAGS += -Isrc/ares/config_freebsd
+LINKFLAGS+=-lkvm
+OBJS += src/unix/freebsd.o
+OBJS += src/unix/kqueue.o
+endif
+
+ifeq (DragonFly,$(uname_S))
+EV_CONFIG=config_freebsd.h
+EIO_CONFIG=config_freebsd.h
+CPPFLAGS += -Isrc/ares/config_freebsd
+LINKFLAGS+=
+OBJS += src/unix/freebsd.o
+OBJS += src/unix/kqueue.o
+endif
+
+ifeq (NetBSD,$(uname_S))
+EV_CONFIG=config_netbsd.h
+EIO_CONFIG=config_netbsd.h
+CPPFLAGS += -Isrc/ares/config_netbsd
+LINKFLAGS+=
+OBJS += src/unix/netbsd.o
+OBJS += src/unix/kqueue.o
+endif
+
+ifeq (OpenBSD,$(uname_S))
+EV_CONFIG=config_openbsd.h
+EIO_CONFIG=config_openbsd.h
+CPPFLAGS += -Isrc/ares/config_openbsd
+LINKFLAGS+=-lkvm
+OBJS += src/unix/openbsd.o
+OBJS += src/unix/kqueue.o
+endif
+
+ifneq (,$(findstring CYGWIN,$(uname_S)))
+EV_CONFIG=config_cygwin.h
+EIO_CONFIG=config_cygwin.h
+# We drop the --std=c89, it hides CLOCK_MONOTONIC on cygwin
+CSTDFLAG = -D_GNU_SOURCE
+CPPFLAGS += -Isrc/ares/config_cygwin
+LINKFLAGS+=
+OBJS += src/unix/cygwin.o
 endif
 
 # Need _GNU_SOURCE for strdup?
 RUNNER_CFLAGS=$(CFLAGS) -D_GNU_SOURCE
+RUNNER_LINKFLAGS=$(LINKFLAGS)
 
-RUNNER_LINKFLAGS=$(LINKFLAGS) -pthread
+ifeq (SunOS,$(uname_S))
+RUNNER_LINKFLAGS += -pthreads
+else
+RUNNER_LINKFLAGS += -pthread
+endif
+
 RUNNER_LIBS=
 RUNNER_SRC=test/runner-unix.c
 
-uv.a: uv-unix.o uv-common.o ev/ev.o
-	$(AR) rcs uv.a uv-unix.o uv-common.o ev/ev.o
+uv.a: $(OBJS) src/cares.o src/uv-common.o src/unix/ev/ev.o src/unix/uv-eio.o src/unix/eio/eio.o $(CARES_OBJS)
+	$(AR) rcs uv.a $(OBJS) src/cares.o src/uv-common.o src/unix/uv-eio.o src/unix/ev/ev.o src/unix/eio/eio.o $(CARES_OBJS)
 
-uv-unix.o: uv-unix.c uv.h uv-unix.h
-	$(CC) $(CFLAGS) -c uv-unix.c -o uv-unix.o
+src/%.o: src/%.c include/uv.h include/uv-private/uv-unix.h
+	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-uv-common.o: uv-common.c uv.h uv-unix.h
-	$(CC) $(CFLAGS) -c uv-common.c -o uv-common.o
+src/unix/%.o: src/unix/%.c include/uv.h include/uv-private/uv-unix.h src/unix/internal.h
+	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-ev/ev.o: ev/config.h ev/ev.c
-	$(MAKE) -C ev
+src/unix/ev/ev.o: src/unix/ev/ev.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c src/unix/ev/ev.c -o src/unix/ev/ev.o -DEV_CONFIG_H=\"$(EV_CONFIG)\"
 
-ev/config.h:
-	cd ev && CPPFLAGS=-DEV_MULTIPLICITY=0 ./configure
+
+EIO_CPPFLAGS += $(CPPFLAGS)
+EIO_CPPFLAGS += -DEIO_CONFIG_H=\"$(EIO_CONFIG)\"
+EIO_CPPFLAGS += -DEIO_STACKSIZE=262144
+EIO_CPPFLAGS += -D_GNU_SOURCE
+
+src/unix/eio/eio.o: src/unix/eio/eio.c
+	$(CC) $(EIO_CPPFLAGS) $(CFLAGS) -c src/unix/eio/eio.c -o src/unix/eio/eio.o
+
+src/unix/uv-eio.o: src/unix/uv-eio.c
+	$(CC) $(CPPFLAGS) -Isrc/unix/eio/ $(CSTDFLAG) $(CFLAGS) -c src/unix/uv-eio.c -o src/unix/uv-eio.o
+
 
 clean-platform:
-	$(MAKE) -C ev clean
+	-rm -f src/ares/*.o
+	-rm -f src/unix/*.o
+	-rm -f src/unix/ev/*.o
+	-rm -f src/unix/eio/*.o
+	-rm -f src/unix/linux/*.o
+	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM
 
 distclean-platform:
-	$(MAKE) -C ev distclean
+	-rm -f src/ares/*.o
+	-rm -f src/unix/*.o
+	-rm -f src/unix/ev/*.o
+	-rm -f src/unix/eio/*.o
+	-rm -f src/unix/linux/*.o
+	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM

@@ -1,4 +1,4 @@
-// Copyright 2006-2009 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -28,6 +28,8 @@
 #ifndef V8_LIST_H_
 #define V8_LIST_H_
 
+#include "utils.h"
+
 namespace v8 {
 namespace internal {
 
@@ -47,7 +49,6 @@ namespace internal {
 template <typename T, class P>
 class List {
  public:
-
   List() { Initialize(0); }
   INLINE(explicit List(int capacity)) { Initialize(capacity); }
   INLINE(~List()) { DeleteData(data_); }
@@ -66,7 +67,7 @@ class List {
 
   // Returns a reference to the element at index i.  This reference is
   // not safe to use after operations that can change the list's
-  // backing store (eg, Add).
+  // backing store (e.g. Add).
   inline T& operator[](int i) const {
     ASSERT(0 <= i);
     ASSERT(i < length_);
@@ -80,7 +81,7 @@ class List {
   INLINE(int length() const) { return length_; }
   INLINE(int capacity() const) { return capacity_; }
 
-  Vector<T> ToVector() { return Vector<T>(data_, length_); }
+  Vector<T> ToVector() const { return Vector<T>(data_, length_); }
 
   Vector<const T> ToConstVector() { return Vector<const T>(data_, length_); }
 
@@ -90,6 +91,9 @@ class List {
 
   // Add all the elements from the argument list to this list.
   void AddAll(const List<T, P>& other);
+
+  // Add all the elements from the vector to this list.
+  void AddAll(const Vector<T>& other);
 
   // Inserts the element at the specific index.
   void InsertAt(int index, const T& element);
@@ -112,6 +116,9 @@ class List {
   // Removes the last element without deleting it even if T is a
   // pointer type. Returns the removed element.
   INLINE(T RemoveLast()) { return Remove(length_ - 1); }
+
+  // Deletes current list contents and allocates space for 'length' elements.
+  INLINE(void Allocate(int length));
 
   // Clears the list by setting the length to zero. Even if T is a
   // pointer type, clearing the list doesn't delete the entries.
@@ -159,6 +166,26 @@ class List {
   DISALLOW_COPY_AND_ASSIGN(List);
 };
 
+class Map;
+class Code;
+template<typename T> class Handle;
+typedef List<Map*> MapList;
+typedef List<Code*> CodeList;
+typedef List<Handle<Map> > MapHandleList;
+typedef List<Handle<Code> > CodeHandleList;
+
+// Perform binary search for an element in an already sorted
+// list. Returns the index of the element of -1 if it was not found.
+// |cmp| is a predicate that takes a pointer to an element of the List
+// and returns +1 if it is greater, -1 if it is less than the element
+// being searched.
+template <typename T, class P>
+int SortedListBSearch(const List<T>& list, P cmp);
+template <typename T>
+int SortedListBSearch(const List<T>& list, T elem);
+
+
 } }  // namespace v8::internal
+
 
 #endif  // V8_LIST_H_

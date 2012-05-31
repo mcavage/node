@@ -38,11 +38,11 @@ namespace internal {
 // Public V8 debugger API message handler function. This function just delegates
 // to the debugger agent through it's data parameter.
 void DebuggerAgentMessageHandler(const v8::Debug::Message& message) {
-  DebuggerAgent::instance_->DebuggerMessage(message);
+  DebuggerAgent* agent = Isolate::Current()->debugger_agent_instance();
+  ASSERT(agent != NULL);
+  agent->DebuggerMessage(message);
 }
 
-// static
-DebuggerAgent* DebuggerAgent::instance_ = NULL;
 
 // Debugger agent main thread.
 void DebuggerAgent::Run() {
@@ -102,21 +102,22 @@ void DebuggerAgent::WaitUntilListening() {
   listening_->Wait();
 }
 
+static const char* kCreateSessionMessage =
+    "Remote debugging session already active\r\n";
+
 void DebuggerAgent::CreateSession(Socket* client) {
   ScopedLock with(session_access_);
 
   // If another session is already established terminate this one.
   if (session_ != NULL) {
-    static const char* message = "Remote debugging session already active\r\n";
-
-    client->Send(message, StrLength(message));
+    client->Send(kCreateSessionMessage, StrLength(kCreateSessionMessage));
     delete client;
     return;
   }
 
   // Create a new session and hook up the debug message handler.
   session_ = new DebuggerAgentSession(this, client);
-  v8::Debug::SetMessageHandler2(DebuggerAgentMessageHandler);
+  isolate_->debugger()->SetMessageHandler(DebuggerAgentMessageHandler);
   session_->Start();
 }
 
@@ -168,7 +169,8 @@ void DebuggerAgentSession::Run() {
 
   while (true) {
     // Read data from the debugger front end.
-    SmartPointer<char> message = DebuggerAgentUtil::ReceiveMessage(client_);
+    SmartArrayPointer<char> message =
+        DebuggerAgentUtil::ReceiveMessage(client_);
 
     const char* msg = *message;
     bool is_closing_session = (msg == NULL);
@@ -202,7 +204,9 @@ void DebuggerAgentSession::Run() {
 
     // Send the request received to the debugger.
     v8::Debug::SendCommand(reinterpret_cast<const uint16_t *>(temp.start()),
-                           len);
+                           len,
+                           NULL,
+                           reinterpret_cast<v8::Isolate*>(agent_->isolate()));
 
     if (is_closing_session) {
       // Session is closed.
@@ -224,12 +228,10 @@ void DebuggerAgentSession::Shutdown() {
 }
 
 
-const char* DebuggerAgentUtil::kContentLength = "Content-Length";
-int DebuggerAgentUtil::kContentLengthSize =
-    StrLength(kContentLength);
+const char* const DebuggerAgentUtil::kContentLength = "Content-Length";
 
 
-SmartPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
+SmartArrayPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
   int received;
 
   // Read header.
@@ -247,7 +249,7 @@ SmartPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
       received = conn->Receive(&c, 1);
       if (received <= 0) {
         PrintF("Error %d\n", Socket::LastError());
-        return SmartPointer<char>();
+        return SmartArrayPointer<char>();
       }
 
       // Add character to header buffer.
@@ -284,12 +286,12 @@ SmartPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
     if (strcmp(key, kContentLength) == 0) {
       // Get the content length value if present and within a sensible range.
       if (value == NULL || strlen(value) > 7) {
-        return SmartPointer<char>();
+        return SmartArrayPointer<char>();
       }
       for (int i = 0; value[i] != '\0'; i++) {
         // Bail out if illegal data.
         if (value[i] < '0' || value[i] > '9') {
-          return SmartPointer<char>();
+          return SmartArrayPointer<char>();
         }
         content_length = 10 * content_length + (value[i] - '0');
       }
@@ -301,7 +303,7 @@ SmartPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
 
   // Return now if no body.
   if (content_length == 0) {
-    return SmartPointer<char>();
+    return SmartArrayPointer<char>();
   }
 
   // Read body.
@@ -309,11 +311,11 @@ SmartPointer<char> DebuggerAgentUtil::ReceiveMessage(const Socket* conn) {
   received = ReceiveAll(conn, buffer, content_length);
   if (received < content_length) {
     PrintF("Error %d\n", Socket::LastError());
-    return SmartPointer<char>();
+    return SmartArrayPointer<char>();
   }
   buffer[content_length] = '\0';
 
-  return SmartPointer<char>(buffer);
+  return SmartArrayPointer<char>(buffer);
 }
 
 
@@ -321,41 +323,41 @@ bool DebuggerAgentUtil::SendConnectMessage(const Socket* conn,
                                            const char* embedding_host) {
   static const int kBufferSize = 80;
   char buffer[kBufferSize];  // Sending buffer.
-  bool ok;
   int len;
+  int r;
 
   // Send the header.
   len = OS::SNPrintF(Vector<char>(buffer, kBufferSize),
                      "Type: connect\r\n");
-  ok = conn->Send(buffer, len);
-  if (!ok) return false;
+  r = conn->Send(buffer, len);
+  if (r != len) return false;
 
   len = OS::SNPrintF(Vector<char>(buffer, kBufferSize),
                      "V8-Version: %s\r\n", v8::V8::GetVersion());
-  ok = conn->Send(buffer, len);
-  if (!ok) return false;
+  r = conn->Send(buffer, len);
+  if (r != len) return false;
 
   len = OS::SNPrintF(Vector<char>(buffer, kBufferSize),
                      "Protocol-Version: 1\r\n");
-  ok = conn->Send(buffer, len);
-  if (!ok) return false;
+  r = conn->Send(buffer, len);
+  if (r != len) return false;
 
   if (embedding_host != NULL) {
     len = OS::SNPrintF(Vector<char>(buffer, kBufferSize),
                        "Embedding-Host: %s\r\n", embedding_host);
-    ok = conn->Send(buffer, len);
-    if (!ok) return false;
+    r = conn->Send(buffer, len);
+    if (r != len) return false;
   }
 
   len = OS::SNPrintF(Vector<char>(buffer, kBufferSize),
                      "%s: 0\r\n", kContentLength);
-  ok = conn->Send(buffer, len);
-  if (!ok) return false;
+  r = conn->Send(buffer, len);
+  if (r != len) return false;
 
   // Terminate header with empty line.
   len = OS::SNPrintF(Vector<char>(buffer, kBufferSize), "\r\n");
-  ok = conn->Send(buffer, len);
-  if (!ok) return false;
+  r = conn->Send(buffer, len);
+  if (r != len) return false;
 
   // No body for connect message.
 
@@ -370,8 +372,11 @@ bool DebuggerAgentUtil::SendMessage(const Socket* conn,
 
   // Calculate the message size in UTF-8 encoding.
   int utf8_len = 0;
+  int previous = unibrow::Utf16::kNoPreviousCharacter;
   for (int i = 0; i < message.length(); i++) {
-    utf8_len += unibrow::Utf8::Length(message[i]);
+    uint16_t character = message[i];
+    utf8_len += unibrow::Utf8::Length(character, previous);
+    previous = character;
   }
 
   // Send the header.
@@ -386,17 +391,33 @@ bool DebuggerAgentUtil::SendMessage(const Socket* conn,
 
   // Send message body as UTF-8.
   int buffer_position = 0;  // Current buffer position.
+  previous = unibrow::Utf16::kNoPreviousCharacter;
   for (int i = 0; i < message.length(); i++) {
     // Write next UTF-8 encoded character to buffer.
+    uint16_t character = message[i];
     buffer_position +=
-        unibrow::Utf8::Encode(buffer + buffer_position, message[i]);
+        unibrow::Utf8::Encode(buffer + buffer_position, character, previous);
     ASSERT(buffer_position < kBufferSize);
 
     // Send buffer if full or last character is encoded.
-    if (kBufferSize - buffer_position < 3 || i == message.length() - 1) {
-      conn->Send(buffer, buffer_position);
-      buffer_position = 0;
+    if (kBufferSize - buffer_position <
+          unibrow::Utf16::kMaxExtraUtf8BytesForOneUtf16CodeUnit ||
+        i == message.length() - 1) {
+      if (unibrow::Utf16::IsLeadSurrogate(character)) {
+        const int kEncodedSurrogateLength =
+            unibrow::Utf16::kUtf8BytesToCodeASurrogate;
+        ASSERT(buffer_position >= kEncodedSurrogateLength);
+        conn->Send(buffer, buffer_position - kEncodedSurrogateLength);
+        for (int i = 0; i < kEncodedSurrogateLength; i++) {
+          buffer[i] = buffer[buffer_position + i];
+        }
+        buffer_position = kEncodedSurrogateLength;
+      } else {
+        conn->Send(buffer, buffer_position);
+        buffer_position = 0;
+      }
     }
+    previous = character;
   }
 
   return true;

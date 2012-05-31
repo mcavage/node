@@ -19,37 +19,40 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+
+
+
 var common = require('../common');
 var assert = require('assert');
 var os = require('os');
 
 
-var hostname = os.hostname()
-console.log("hostname = %s", hostname);
+var hostname = os.hostname();
+console.log('hostname = %s', hostname);
 assert.ok(hostname.length > 0);
 
 var uptime = os.uptime();
-console.log("uptime = %d", uptime);
+console.log('uptime = %d', uptime);
 assert.ok(uptime > 0);
 
 var cpus = os.cpus();
-console.log("cpus = ", cpus);
+console.log('cpus = ', cpus);
 assert.ok(cpus.length > 0);
 
 var type = os.type();
-console.log("type = ", type);
+console.log('type = ', type);
 assert.ok(type.length > 0);
 
 var release = os.release();
-console.log("release = ", release);
+console.log('release = ', release);
 assert.ok(release.length > 0);
 
 var platform = os.platform();
-console.log("platform = ", platform);
+console.log('platform = ', platform);
 assert.ok(platform.length > 0);
 
 var arch = os.arch();
-console.log("arch = ", arch);
+console.log('arch = ', arch);
 assert.ok(arch.length > 0);
 
 if (process.platform != 'sunos') {
@@ -60,10 +63,22 @@ if (process.platform != 'sunos') {
 }
 
 
-var interfaces = os.getNetworkInterfaces();
+var interfaces = os.networkInterfaces();
 console.error(interfaces);
 switch (platform) {
   case 'linux':
-    assert.equal('127.0.0.1', interfaces.lo.ip);
+    var filter = function(e) { return e.address == '127.0.0.1'; };
+    var actual = interfaces.lo.filter(filter);
+    var expected = [{ address: '127.0.0.1', family: 'IPv4', internal: true }];
+    assert.deepEqual(actual, expected);
+    break;
+  case 'win32':
+    var filter = function(e) { return e.address == '127.0.0.1'; };
+    var actual = interfaces['Loopback Pseudo-Interface 1'].filter(filter);
+    var expected = [{ address: '127.0.0.1', family: 'IPv4', internal: true }];
+    assert.deepEqual(actual, expected);
     break;
 }
+
+var EOL = os.EOL;
+assert.ok(EOL.length > 0);

@@ -25,6 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "v8.h"
 #include "lithium.h"
 
 namespace v8 {
@@ -35,6 +36,7 @@ void LOperand::PrintTo(StringStream* stream) {
   LUnallocated* unalloc = NULL;
   switch (kind()) {
     case INVALID:
+      stream->Add("(0)");
       break;
     case UNALLOCATED:
       unalloc = LUnallocated::cast(this);
@@ -69,9 +71,6 @@ void LOperand::PrintTo(StringStream* stream) {
         case LUnallocated::ANY:
           stream->Add("(-)");
           break;
-        case LUnallocated::IGNORE:
-          stream->Add("(0)");
-          break;
       }
       break;
     case CONSTANT_OPERAND:
@@ -95,10 +94,35 @@ void LOperand::PrintTo(StringStream* stream) {
   }
 }
 
+#define DEFINE_OPERAND_CACHE(name, type)                      \
+  L##name* L##name::cache = NULL;                             \
+                                                              \
+  void L##name::SetUpCache() {                                \
+    if (cache) return;                                        \
+    cache = new L##name[kNumCachedOperands];                  \
+    for (int i = 0; i < kNumCachedOperands; i++) {            \
+      cache[i].ConvertTo(type, i);                            \
+    }                                                         \
+  }                                                           \
+                                                              \
+  void L##name::TearDownCache() {                             \
+    delete[] cache;                                           \
+  }
 
-int LOperand::VirtualRegister() {
-  LUnallocated* unalloc = LUnallocated::cast(this);
-  return unalloc->virtual_register();
+LITHIUM_OPERAND_LIST(DEFINE_OPERAND_CACHE)
+#undef DEFINE_OPERAND_CACHE
+
+void LOperand::SetUpCaches() {
+#define LITHIUM_OPERAND_SETUP(name, type) L##name::SetUpCache();
+  LITHIUM_OPERAND_LIST(LITHIUM_OPERAND_SETUP)
+#undef LITHIUM_OPERAND_SETUP
+}
+
+
+void LOperand::TearDownCaches() {
+#define LITHIUM_OPERAND_TEARDOWN(name, type) L##name::TearDownCache();
+  LITHIUM_OPERAND_LIST(LITHIUM_OPERAND_TEARDOWN)
+#undef LITHIUM_OPERAND_TEARDOWN
 }
 
 
@@ -155,6 +179,27 @@ void LPointerMap::RecordPointer(LOperand* op) {
 }
 
 
+void LPointerMap::RemovePointer(LOperand* op) {
+  // Do not record arguments as pointers.
+  if (op->IsStackSlot() && op->index() < 0) return;
+  ASSERT(!op->IsDoubleRegister() && !op->IsDoubleStackSlot());
+  for (int i = 0; i < pointer_operands_.length(); ++i) {
+    if (pointer_operands_[i]->Equals(op)) {
+      pointer_operands_.Remove(i);
+      --i;
+    }
+  }
+}
+
+
+void LPointerMap::RecordUntagged(LOperand* op) {
+  // Do not record arguments as pointers.
+  if (op->IsStackSlot() && op->index() < 0) return;
+  ASSERT(!op->IsDoubleRegister() && !op->IsDoubleStackSlot());
+  untagged_operands_.Add(op);
+}
+
+
 void LPointerMap::PrintTo(StringStream* stream) {
   stream->Add("{");
   for (int i = 0; i < pointer_operands_.length(); ++i) {
@@ -162,6 +207,33 @@ void LPointerMap::PrintTo(StringStream* stream) {
     pointer_operands_[i]->PrintTo(stream);
   }
   stream->Add("} @%d", position());
+}
+
+
+int ElementsKindToShiftSize(ElementsKind elements_kind) {
+  switch (elements_kind) {
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_PIXEL_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      return 0;
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      return 1;
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS:
+      return 2;
+    case EXTERNAL_DOUBLE_ELEMENTS:
+    case FAST_DOUBLE_ELEMENTS:
+      return 3;
+    case FAST_SMI_ONLY_ELEMENTS:
+    case FAST_ELEMENTS:
+    case DICTIONARY_ELEMENTS:
+    case NON_STRICT_ARGUMENTS_ELEMENTS:
+      return kPointerSizeLog2;
+  }
+  UNREACHABLE();
+  return 0;
 }
 
 

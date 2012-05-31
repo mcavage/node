@@ -78,7 +78,7 @@ process.nextTick(function() {
   console.log('kill pid %d', killMeTwice.pid);
   // make sure there is no race condition in starting the process
   // the PID SHOULD exist directly following the exec() call.
-  assert.equal('number', typeof killMeTwice._internal.pid);
+  assert.equal('number', typeof killMeTwice._handle.pid);
   // Kill the process
   killMeTwice.kill();
 });
@@ -105,7 +105,7 @@ exec('python -c "print 200000*\'C\'"', {maxBuffer: 1000},
        assert.ok(/maxBuffer/.test(err.message));
      });
 
-process.addListener('exit', function() {
+process.on('exit', function() {
   assert.equal(1, success_count);
   assert.equal(1, error_count);
 });

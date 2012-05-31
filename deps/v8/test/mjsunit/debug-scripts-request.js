@@ -71,15 +71,17 @@ function listener(event, exec_state, event_data, data) {
     testArguments(dcp, '{"types":2}', true);
     testArguments(dcp, '{"types":4}', true);
     testArguments(dcp, '{"types":7}', true);
-    testArguments(dcp, '{"types":0xFF}', true);
+    testArguments(dcp, '{"types":255}', true);
 
     // Test request for all scripts.
     var request = '{' + base_request + '}'
     var response = safeEval(dcp.processDebugJSONRequest(request));
     assertTrue(response.success);
 
-    // Test filtering by id.
-    assertEquals(2, response.body.length);
+    // Test filtering by id.  We have to get at least one script back, but
+    // the exact number depends on the timing of GC.
+    assertTrue(response.body.length >= 1);
+
     var script = response.body[0];
     var request = '{' + base_request + ',"arguments":{"ids":[' +
                   script.id + ']}}';

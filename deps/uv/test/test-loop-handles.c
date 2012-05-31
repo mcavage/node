@@ -58,13 +58,13 @@
  *   being started by a check_1 watcher. It verifies that a watcher is
  *   implicitly stopped when closed, and that a watcher can close itself
  *   safely.
- * - There is a repeating timer. It does not keep te event loop alive
+ * - There is a repeating timer. It does not keep the event loop alive
  *   (ev_unref) but makes sure that the loop keeps polling the system for
  *   events.
  */
 
 
-#include "../uv.h"
+#include "uv.h"
 #include "task.h"
 
 #include <math.h>
@@ -106,42 +106,17 @@ static int idle_2_close_cb_called = 0;
 static int idle_2_cb_started = 0;
 static int idle_2_is_active = 0;
 
-static int timer_cb_called = 0;
 
-
-static void timer_cb(uv_handle_t* handle, int status) {
-  ASSERT(handle == (uv_handle_t*)&timer_handle);
+static void timer_cb(uv_timer_t* handle, int status) {
+  ASSERT(handle == &timer_handle);
   ASSERT(status == 0);
-
-  timer_cb_called++;
 }
 
 
-static void timer_close_cb(uv_handle_t* handle, int status) {
-  FATAL("timer_close_cb should not be called");
-}
-
-
-static void idle_2_cb(uv_handle_t* handle, int status) {
-  int r;
-
-  LOG("IDLE_2_CB\n");
-
-  ASSERT(handle == (uv_handle_t*)&idle_2_handle);
-  ASSERT(status == 0);
-
-  idle_2_cb_called++;
-
-  r = uv_close(handle);
-  ASSERT(r == 0);
-}
-
-
-static void idle_2_close_cb(uv_handle_t* handle, int status){
+static void idle_2_close_cb(uv_handle_t* handle) {
   LOG("IDLE_2_CLOSE_CB\n");
 
   ASSERT(handle == (uv_handle_t*)&idle_2_handle);
-  ASSERT(status == 0);
 
   ASSERT(idle_2_is_active);
 
@@ -150,7 +125,19 @@ static void idle_2_close_cb(uv_handle_t* handle, int status){
 }
 
 
-static void idle_1_cb(uv_handle_t* handle, int status) {
+static void idle_2_cb(uv_idle_t* handle, int status) {
+  LOG("IDLE_2_CB\n");
+
+  ASSERT(handle == &idle_2_handle);
+  ASSERT(status == 0);
+
+  idle_2_cb_called++;
+
+  uv_close((uv_handle_t*)handle, idle_2_close_cb);
+}
+
+
+static void idle_1_cb(uv_idle_t* handle, int status) {
   int r;
 
   LOG("IDLE_1_CB\n");
@@ -162,7 +149,7 @@ static void idle_1_cb(uv_handle_t* handle, int status) {
 
   /* Init idle_2 and make it active */
   if (!idle_2_is_active) {
-    r = uv_idle_init(&idle_2_handle, idle_2_close_cb, NULL);
+    r = uv_idle_init(uv_default_loop(), &idle_2_handle);
     ASSERT(r == 0);
     r = uv_idle_start(&idle_2_handle, idle_2_cb);
     ASSERT(r == 0);
@@ -180,22 +167,45 @@ static void idle_1_cb(uv_handle_t* handle, int status) {
 }
 
 
-static void idle_1_close_cb(uv_handle_t* handle, int status){
+static void idle_1_close_cb(uv_handle_t* handle) {
   LOG("IDLE_1_CLOSE_CB\n");
 
   ASSERT(handle != NULL);
-  ASSERT(status == 0);
 
   idle_1_close_cb_called++;
 }
 
 
-static void check_cb(uv_handle_t* handle, int status) {
+static void prepare_1_close_cb(uv_handle_t* handle) {
+  LOG("PREPARE_1_CLOSE_CB");
+  ASSERT(handle == (uv_handle_t*)&prepare_1_handle);
+
+  prepare_1_close_cb_called++;
+}
+
+
+static void check_close_cb(uv_handle_t* handle) {
+  LOG("CHECK_CLOSE_CB\n");
+  ASSERT(handle == (uv_handle_t*)&check_handle);
+
+  check_close_cb_called++;
+}
+
+
+static void prepare_2_close_cb(uv_handle_t* handle) {
+  LOG("PREPARE_2_CLOSE_CB\n");
+  ASSERT(handle == (uv_handle_t*)&prepare_2_handle);
+
+  prepare_2_close_cb_called++;
+}
+
+
+static void check_cb(uv_check_t* handle, int status) {
   int i, r;
 
   LOG("CHECK_CB\n");
 
-  ASSERT(handle == (uv_handle_t*)&check_handle);
+  ASSERT(handle == &check_handle);
   ASSERT(status == 0);
 
   /* XXX
@@ -213,23 +223,18 @@ static void check_cb(uv_handle_t* handle, int status) {
 
   } else {
     /* End of the test - close all handles */
-    r = uv_close((uv_handle_t*)&prepare_1_handle);
-    ASSERT(r == 0);
-    r = uv_close((uv_handle_t*)&check_handle);
-    ASSERT(r == 0);
-    r = uv_close((uv_handle_t*)&prepare_2_handle);
-    ASSERT(r == 0);
+    uv_close((uv_handle_t*)&prepare_1_handle, prepare_1_close_cb);
+    uv_close((uv_handle_t*)&check_handle, check_close_cb);
+    uv_close((uv_handle_t*)&prepare_2_handle, prepare_2_close_cb);
 
     for (i = 0; i < IDLE_COUNT; i++) {
-      r = uv_close((uv_handle_t*)&idle_1_handles[i]);
-      ASSERT(r == 0);
+      uv_close((uv_handle_t*)&idle_1_handles[i], idle_1_close_cb);
     }
 
     /* This handle is closed/recreated every time, close it only if it is */
     /* active.*/
     if (idle_2_is_active) {
-      r = uv_close((uv_handle_t*)&idle_2_handle);
-      ASSERT(r == 0);
+      uv_close((uv_handle_t*)&idle_2_handle, idle_2_close_cb);
     }
   }
 
@@ -237,21 +242,12 @@ static void check_cb(uv_handle_t* handle, int status) {
 }
 
 
-static void check_close_cb(uv_handle_t* handle, int status){
-  LOG("CHECK_CLOSE_CB\n");
-  ASSERT(handle == (uv_handle_t*)&check_handle);
-  ASSERT(status == 0);
-
-  check_close_cb_called++;
-}
-
-
-static void prepare_2_cb(uv_handle_t* handle, int status) {
+static void prepare_2_cb(uv_prepare_t* handle, int status) {
   int r;
 
   LOG("PREPARE_2_CB\n");
 
-  ASSERT(handle == (uv_handle_t*)&prepare_2_handle);
+  ASSERT(handle == &prepare_2_handle);
   ASSERT(status == 0);
 
   /* XXX ASSERT(idles_1_active == 0); */
@@ -270,21 +266,12 @@ static void prepare_2_cb(uv_handle_t* handle, int status) {
 }
 
 
-static void prepare_2_close_cb(uv_handle_t* handle, int status) {
-  LOG("PREPARE_2_CLOSE_CB\n");
-  ASSERT(handle == (uv_handle_t*)&prepare_2_handle);
-  ASSERT(status == 0);
-
-  prepare_2_close_cb_called++;
-}
-
-
-static void prepare_1_cb(uv_handle_t* handle, int status) {
+static void prepare_1_cb(uv_prepare_t* handle, int status) {
   int r;
 
   LOG("PREPARE_1_CB\n");
 
-  ASSERT(handle == (uv_handle_t*)&prepare_1_handle);
+  ASSERT(handle == &prepare_1_handle);
   ASSERT(status == 0);
 
   /* XXX
@@ -304,38 +291,27 @@ static void prepare_1_cb(uv_handle_t* handle, int status) {
 }
 
 
-static void prepare_1_close_cb(uv_handle_t* handle, int status){
-  LOG("PREPARE_1_CLOSE_CB");
-  ASSERT(handle == (uv_handle_t*)&prepare_1_handle);
-  ASSERT(status == 0);
-
-  prepare_1_close_cb_called++;
-}
-
-
 TEST_IMPL(loop_handles) {
   int i;
   int r;
 
-  uv_init();
-
-  r = uv_prepare_init(&prepare_1_handle, prepare_1_close_cb, NULL);
+  r = uv_prepare_init(uv_default_loop(), &prepare_1_handle);
   ASSERT(r == 0);
   r = uv_prepare_start(&prepare_1_handle, prepare_1_cb);
   ASSERT(r == 0);
 
-  r = uv_check_init(&check_handle, check_close_cb, NULL);
+  r = uv_check_init(uv_default_loop(), &check_handle);
   ASSERT(r == 0);
   r = uv_check_start(&check_handle, check_cb);
   ASSERT(r == 0);
 
   /* initialize only, prepare_2 is started by prepare_1_cb */
-  r = uv_prepare_init(&prepare_2_handle, prepare_2_close_cb, NULL);
+  r = uv_prepare_init(uv_default_loop(), &prepare_2_handle);
   ASSERT(r == 0);
 
   for (i = 0; i < IDLE_COUNT; i++) {
     /* initialize only, idle_1 handles are started by check_cb */
-    r = uv_idle_init(&idle_1_handles[i], idle_1_close_cb, NULL);
+    r = uv_idle_init(uv_default_loop(), &idle_1_handles[i]);
     ASSERT(r == 0);
   }
 
@@ -343,13 +319,13 @@ TEST_IMPL(loop_handles) {
 
   /* the timer callback is there to keep the event loop polling */
   /* unref it as it is not supposed to keep the loop alive */
-  r = uv_timer_init(&timer_handle, timer_close_cb, NULL);
+  r = uv_timer_init(uv_default_loop(), &timer_handle);
   ASSERT(r == 0);
   r = uv_timer_start(&timer_handle, timer_cb, TIMEOUT, TIMEOUT);
   ASSERT(r == 0);
-  uv_unref();
+  uv_unref((uv_handle_t*)&timer_handle);
 
-  r = uv_run();
+  r = uv_run(uv_default_loop());
   ASSERT(r == 0);
 
   ASSERT(loop_iteration == ITERATIONS);
@@ -373,57 +349,5 @@ TEST_IMPL(loop_handles) {
   ASSERT(idle_2_close_cb_called == idle_2_cb_started);
   ASSERT(idle_2_is_active == 0);
 
-  ASSERT(timer_cb_called > 0);
-
-  return 0;
-}
-
-
-TEST_IMPL(ref) {
-  uv_init();
-  uv_run();
-  return 0;
-}
-
-
-TEST_IMPL(idle_ref) {
-  uv_idle_t h;
-  uv_init();
-  uv_idle_init(&h, NULL, NULL);
-  uv_idle_start(&h, NULL);
-  uv_unref();
-  uv_run();
-  return 0;
-}
-
-
-TEST_IMPL(async_ref) {
-  uv_async_t h;
-  uv_init();
-  uv_async_init(&h, NULL, NULL, NULL);
-  uv_unref();
-  uv_run();
-  return 0;
-}
-
-
-TEST_IMPL(prepare_ref) {
-  uv_prepare_t h;
-  uv_init();
-  uv_prepare_init(&h, NULL, NULL);
-  uv_prepare_start(&h, NULL);
-  uv_unref();
-  uv_run();
-  return 0;
-}
-
-
-TEST_IMPL(check_ref) {
-  uv_check_t h;
-  uv_init();
-  uv_check_init(&h, NULL, NULL);
-  uv_check_start(&h, NULL);
-  uv_unref();
-  uv_run();
   return 0;
 }

@@ -1,4 +1,4 @@
-// Copyright 2010 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -88,6 +88,9 @@ class Decoder {
   // Writes one disassembled instruction into 'buffer' (0-terminated).
   // Returns the length of the disassembled machine instruction in bytes.
   int InstructionDecode(byte* instruction);
+
+  static bool IsConstantPoolAt(byte* instr_ptr);
+  static int ConstantPoolSizeAt(byte* instr_ptr);
 
  private:
   // Bottleneck functions to print into the out_buffer.
@@ -197,7 +200,7 @@ void Decoder::PrintDRegister(int reg) {
 
 // These shift names are defined in a way to match the native disassembler
 // formatting. See for example the command "objdump -d <binary file>".
-static const char* shift_names[kNumberOfShifts] = {
+static const char* const shift_names[kNumberOfShifts] = {
   "lsl", "lsr", "asr", "ror"
 };
 
@@ -368,25 +371,34 @@ int Decoder::FormatRegister(Instruction* instr, const char* format) {
 int Decoder::FormatVFPRegister(Instruction* instr, const char* format) {
   ASSERT((format[0] == 'S') || (format[0] == 'D'));
 
+  VFPRegPrecision precision =
+      format[0] == 'D' ? kDoublePrecision : kSinglePrecision;
+
+  int retval = 2;
+  int reg = -1;
   if (format[1] == 'n') {
-    int reg = instr->VnValue();
-    if (format[0] == 'S') PrintSRegister(((reg << 1) | instr->NValue()));
-    if (format[0] == 'D') PrintDRegister(reg);
-    return 2;
+    reg = instr->VFPNRegValue(precision);
   } else if (format[1] == 'm') {
-    int reg = instr->VmValue();
-    if (format[0] == 'S') PrintSRegister(((reg << 1) | instr->MValue()));
-    if (format[0] == 'D') PrintDRegister(reg);
-    return 2;
+    reg = instr->VFPMRegValue(precision);
   } else if (format[1] == 'd') {
-    int reg = instr->VdValue();
-    if (format[0] == 'S') PrintSRegister(((reg << 1) | instr->DValue()));
-    if (format[0] == 'D') PrintDRegister(reg);
-    return 2;
+    reg = instr->VFPDRegValue(precision);
+    if (format[2] == '+') {
+      int immed8 = instr->Immed8Value();
+      if (format[0] == 'S') reg += immed8 - 1;
+      if (format[0] == 'D') reg += (immed8 / 2 - 1);
+    }
+    if (format[2] == '+') retval = 3;
+  } else {
+    UNREACHABLE();
   }
 
-  UNREACHABLE();
-  return -1;
+  if (precision == kSinglePrecision) {
+    PrintSRegister(reg);
+  } else {
+    PrintDRegister(reg);
+  }
+
+  return retval;
 }
 
 
@@ -461,7 +473,7 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
       return 1;
     }
     case 'i': {  // 'i: immediate value from adjacent bits.
-      // Expects tokens in the form imm%02d@%02d, ie. imm05@07, imm10@16
+      // Expects tokens in the form imm%02d@%02d, i.e. imm05@07, imm10@16
       int width = (format[3] - '0') * 10 + (format[4] - '0');
       int lsb   = (format[6] - '0') * 10 + (format[7] - '0');
 
@@ -490,13 +502,16 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
         ASSERT(STRING_STARTS_WITH(format, "memop"));
         if (instr->HasL()) {
           Print("ldr");
-        } else if ((instr->Bits(27, 25) == 0) && (instr->Bit(20) == 0)) {
-          if (instr->Bits(7, 4) == 0xf) {
-            Print("strd");
-          } else {
-            Print("ldrd");
-          }
         } else {
+          if ((instr->Bits(27, 25) == 0) && (instr->Bit(20) == 0) &&
+              (instr->Bits(7, 6) == 3) && (instr->Bit(4) == 1)) {
+            if (instr->Bit(5) == 1) {
+              Print("strd");
+            } else {
+              Print("ldrd");
+            }
+            return 5;
+          }
           Print("str");
         }
         return 5;
@@ -644,6 +659,15 @@ void Decoder::Format(Instruction* instr, const char* format) {
     cur = *format++;
   }
   out_buffer_[out_buffer_pos_]  = '\0';
+}
+
+
+// The disassembler may end up decoding data inlined in the code. We do not want
+// it to crash if the data does not ressemble any known instruction.
+#define VERIFY(condition) \
+if(!(condition)) {        \
+  Unknown(instr);         \
+  return;                 \
 }
 
 
@@ -899,6 +923,7 @@ void Decoder::DecodeType2(Instruction* instr) {
     case da_x: {
       if (instr->HasW()) {
         Unknown(instr);  // not used in V8
+        return;
       }
       Format(instr, "'memop'cond'b 'rd, ['rn], #-'off12");
       break;
@@ -906,6 +931,7 @@ void Decoder::DecodeType2(Instruction* instr) {
     case ia_x: {
       if (instr->HasW()) {
         Unknown(instr);  // not used in V8
+        return;
       }
       Format(instr, "'memop'cond'b 'rd, ['rn], #+'off12");
       break;
@@ -930,13 +956,13 @@ void Decoder::DecodeType2(Instruction* instr) {
 void Decoder::DecodeType3(Instruction* instr) {
   switch (instr->PUField()) {
     case da_x: {
-      ASSERT(!instr->HasW());
+      VERIFY(!instr->HasW());
       Format(instr, "'memop'cond'b 'rd, ['rn], -'shift_rm");
       break;
     }
     case ia_x: {
       if (instr->HasW()) {
-        ASSERT(instr->Bits(5, 4) == 0x1);
+        VERIFY(instr->Bits(5, 4) == 0x1);
         if (instr->Bit(22) == 0x1) {
           Format(instr, "usat 'rd, #'imm05@16, 'rm'shift_sat");
         } else {
@@ -992,11 +1018,15 @@ void Decoder::DecodeType3(Instruction* instr) {
 
 
 void Decoder::DecodeType4(Instruction* instr) {
-  ASSERT(instr->Bit(22) == 0);  // Privileged mode currently not supported.
-  if (instr->HasL()) {
-    Format(instr, "ldm'cond'pu 'rn'w, 'rlist");
+  if (instr->Bit(22) != 0) {
+    // Privileged mode currently not supported.
+    Unknown(instr);
   } else {
-    Format(instr, "stm'cond'pu 'rn'w, 'rlist");
+    if (instr->HasL()) {
+      Format(instr, "ldm'cond'pu 'rn'w, 'rlist");
+    } else {
+      Format(instr, "stm'cond'pu 'rn'w, 'rlist");
+    }
   }
 }
 
@@ -1042,6 +1072,8 @@ int Decoder::DecodeType7(Instruction* instr) {
 // vmov: Rt = Sn
 // vcvt: Dd = Sm
 // vcvt: Sd = Dm
+// Dd = vabs(Dm)
+// Dd = vneg(Dm)
 // Dd = vadd(Dn, Dm)
 // Dd = vsub(Dn, Dm)
 // Dd = vmul(Dn, Dm)
@@ -1051,8 +1083,8 @@ int Decoder::DecodeType7(Instruction* instr) {
 // vmsr
 // Dd = vsqrt(Dm)
 void Decoder::DecodeTypeVFP(Instruction* instr) {
-  ASSERT((instr->TypeValue() == 7) && (instr->Bit(24) == 0x0) );
-  ASSERT(instr->Bits(11, 9) == 0x5);
+  VERIFY((instr->TypeValue() == 7) && (instr->Bit(24) == 0x0) );
+  VERIFY(instr->Bits(11, 9) == 0x5);
 
   if (instr->Bit(4) == 0) {
     if (instr->Opc1Value() == 0x7) {
@@ -1066,7 +1098,10 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
         }
       } else if ((instr->Opc2Value() == 0x0) && (instr->Opc3Value() == 0x3)) {
         // vabs
-        Format(instr, "vabs'cond 'Dd, 'Dm");
+        Format(instr, "vabs.f64'cond 'Dd, 'Dm");
+      } else if ((instr->Opc2Value() == 0x1) && (instr->Opc3Value() == 0x1)) {
+        // vneg
+        Format(instr, "vneg.f64'cond 'Dd, 'Dm");
       } else if ((instr->Opc2Value() == 0x7) && (instr->Opc3Value() == 0x3)) {
         DecodeVCVTBetweenDoubleAndSingle(instr);
       } else if ((instr->Opc2Value() == 0x8) && (instr->Opc3Value() & 0x1)) {
@@ -1140,7 +1175,7 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
 
 void Decoder::DecodeVMOVBetweenCoreAndSinglePrecisionRegisters(
     Instruction* instr) {
-  ASSERT((instr->Bit(4) == 1) && (instr->VCValue() == 0x0) &&
+  VERIFY((instr->Bit(4) == 1) && (instr->VCValue() == 0x0) &&
          (instr->VAValue() == 0x0));
 
   bool to_arm_register = (instr->VLValue() == 0x1);
@@ -1154,8 +1189,8 @@ void Decoder::DecodeVMOVBetweenCoreAndSinglePrecisionRegisters(
 
 
 void Decoder::DecodeVCMP(Instruction* instr) {
-  ASSERT((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
-  ASSERT(((instr->Opc2Value() == 0x4) || (instr->Opc2Value() == 0x5)) &&
+  VERIFY((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
+  VERIFY(((instr->Opc2Value() == 0x4) || (instr->Opc2Value() == 0x5)) &&
          (instr->Opc3Value() & 0x1));
 
   // Comparison.
@@ -1177,8 +1212,8 @@ void Decoder::DecodeVCMP(Instruction* instr) {
 
 
 void Decoder::DecodeVCVTBetweenDoubleAndSingle(Instruction* instr) {
-  ASSERT((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
-  ASSERT((instr->Opc2Value() == 0x7) && (instr->Opc3Value() == 0x3));
+  VERIFY((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
+  VERIFY((instr->Opc2Value() == 0x7) && (instr->Opc3Value() == 0x3));
 
   bool double_to_single = (instr->SzValue() == 1);
 
@@ -1191,8 +1226,8 @@ void Decoder::DecodeVCVTBetweenDoubleAndSingle(Instruction* instr) {
 
 
 void Decoder::DecodeVCVTBetweenFloatingPointAndInteger(Instruction* instr) {
-  ASSERT((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
-  ASSERT(((instr->Opc2Value() == 0x8) && (instr->Opc3Value() & 0x1)) ||
+  VERIFY((instr->Bit(4) == 0) && (instr->Opc1Value() == 0x7));
+  VERIFY(((instr->Opc2Value() == 0x8) && (instr->Opc3Value() & 0x1)) ||
          (((instr->Opc2Value() >> 1) == 0x6) && (instr->Opc3Value() & 0x1)));
 
   bool to_integer = (instr->Bit(18) == 1);
@@ -1239,7 +1274,7 @@ void Decoder::DecodeVCVTBetweenFloatingPointAndInteger(Instruction* instr) {
 // Ddst = MEM(Rbase + 4*offset).
 // MEM(Rbase + 4*offset) = Dsrc.
 void Decoder::DecodeType6CoprocessorIns(Instruction* instr) {
-  ASSERT(instr->TypeValue() == 6);
+  VERIFY(instr->TypeValue() == 6);
 
   if (instr->CoprocessorValue() == 0xA) {
     switch (instr->OpcodeValue()) {
@@ -1259,9 +1294,22 @@ void Decoder::DecodeType6CoprocessorIns(Instruction* instr) {
           Format(instr, "vstr'cond 'Sd, ['rn + 4*'imm08@00]");
         }
         break;
+      case 0x4:
+      case 0x5:
+      case 0x6:
+      case 0x7:
+      case 0x9:
+      case 0xB: {
+        bool to_vfp_register = (instr->VLValue() == 0x1);
+        if (to_vfp_register) {
+          Format(instr, "vldm'cond'pu 'rn'w, {'Sd-'Sd+}");
+        } else {
+          Format(instr, "vstm'cond'pu 'rn'w, {'Sd-'Sd+}");
+        }
+        break;
+      }
       default:
         Unknown(instr);  // Not used by V8.
-        break;
     }
   } else if (instr->CoprocessorValue() == 0xB) {
     switch (instr->OpcodeValue()) {
@@ -1289,12 +1337,39 @@ void Decoder::DecodeType6CoprocessorIns(Instruction* instr) {
           Format(instr, "vstr'cond 'Dd, ['rn + 4*'imm08@00]");
         }
         break;
+      case 0x4:
+      case 0x5:
+      case 0x9: {
+        bool to_vfp_register = (instr->VLValue() == 0x1);
+        if (to_vfp_register) {
+          Format(instr, "vldm'cond'pu 'rn'w, {'Dd-'Dd+}");
+        } else {
+          Format(instr, "vstm'cond'pu 'rn'w, {'Dd-'Dd+}");
+        }
+        break;
+      }
       default:
         Unknown(instr);  // Not used by V8.
-        break;
     }
   } else {
-    UNIMPLEMENTED();  // Not used by V8.
+    Unknown(instr);  // Not used by V8.
+  }
+}
+
+#undef VERIFIY
+
+bool Decoder::IsConstantPoolAt(byte* instr_ptr) {
+  int instruction_bits = *(reinterpret_cast<int*>(instr_ptr));
+  return (instruction_bits & kConstantPoolMarkerMask) == kConstantPoolMarker;
+}
+
+
+int Decoder::ConstantPoolSizeAt(byte* instr_ptr) {
+  if (IsConstantPoolAt(instr_ptr)) {
+    int instruction_bits = *(reinterpret_cast<int*>(instr_ptr));
+    return instruction_bits & kConstantPoolLengthMask;
+  } else {
+    return -1;
   }
 }
 
@@ -1307,7 +1382,15 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
                                   "%08x       ",
                                   instr->InstructionBits());
   if (instr->ConditionField() == kSpecialCondition) {
-    UNIMPLEMENTED();
+    Unknown(instr);
+    return Instruction::kInstrSize;
+  }
+  int instruction_bits = *(reinterpret_cast<int*>(instr_ptr));
+  if ((instruction_bits & kConstantPoolMarkerMask) == kConstantPoolMarker) {
+    out_buffer_pos_ += OS::SNPrintF(out_buffer_ + out_buffer_pos_,
+                                    "constant pool begin (length %d)",
+                                    instruction_bits &
+                                    kConstantPoolLengthMask);
     return Instruction::kInstrSize;
   }
   switch (instr->TypeValue()) {
@@ -1359,9 +1442,8 @@ namespace disasm {
 
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
-  static v8::internal::EmbeddedVector<char, 32> tmp_buffer;
-  v8::internal::OS::SNPrintF(tmp_buffer, "%p", addr);
-  return tmp_buffer.start();
+  v8::internal::OS::SNPrintF(tmp_buffer_, "%p", addr);
+  return tmp_buffer_.start();
 }
 
 
@@ -1411,12 +1493,7 @@ int Disassembler::InstructionDecode(v8::internal::Vector<char> buffer,
 
 
 int Disassembler::ConstantPoolSizeAt(byte* instruction) {
-  int instruction_bits = *(reinterpret_cast<int*>(instruction));
-  if ((instruction_bits & 0xfff00000) == 0x03000000) {
-    return instruction_bits & 0x0000ffff;
-  } else {
-    return -1;
-  }
+  return v8::internal::Decoder::ConstantPoolSizeAt(instruction);
 }
 
 
