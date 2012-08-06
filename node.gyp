@@ -5,10 +5,11 @@
     # See http://codereview.chromium.org/8159015
     'werror': '',
     'node_use_dtrace%': 'false',
+    'node_use_etw%': 'false',
     'node_shared_v8%': 'false',
     'node_shared_zlib%': 'false',
     'node_use_openssl%': 'true',
-    'node_use_system_openssl%': 'false',
+    'node_shared_openssl%': 'false',
     'library_files': [
       'src/node.js',
       'lib/_debugger.js',
@@ -81,6 +82,7 @@
         'src/node_main.cc',
         'src/node_os.cc',
         'src/node_script.cc',
+        'src/node_stat_watcher.cc',
         'src/node_string.cc',
         'src/node_zlib.cc',
         'src/pipe_wrap.cc',
@@ -109,6 +111,9 @@
         'src/node_version.h',
         'src/ngx-queue.h',
         'src/pipe_wrap.h',
+        'src/tty_wrap.h',
+        'src/tcp_wrap.h',
+        'src/udp_wrap.h',
         'src/req_wrap.h',
         'src/slab_allocator.h',
         'src/stream_wrap.h',
@@ -132,7 +137,7 @@
           'defines': [ 'HAVE_OPENSSL=1' ],
           'sources': [ 'src/node_crypto.cc' ],
           'conditions': [
-            [ 'node_use_system_openssl=="false"', {
+            [ 'node_shared_openssl=="false"', {
               'dependencies': [ './deps/openssl/openssl.gyp:openssl' ],
             }]]
         }, {
@@ -160,13 +165,19 @@
             }
           ] ],
         } ],
-
-        [ 'node_shared_v8=="true"', {
+        [ 'node_use_etw=="true"', {
+          'defines': [ 'HAVE_ETW=1' ],
+          'dependencies': [ 'node_etw' ],
           'sources': [
-            '<(node_shared_v8_includes)/v8.h',
-            '<(node_shared_v8_includes)/v8-debug.h',
-          ],
-        }, {
+            'src/node_win32_etw_provider.h',
+            'src/node_win32_etw_provider-inl.h',
+            'src/node_win32_etw_provider.cc',
+            'src/node_dtrace.cc',
+            '<(SHARED_INTERMEDIATE_DIR)/node_etw_provider.h',
+            '<(SHARED_INTERMEDIATE_DIR)/node_etw_provider.rc',
+          ]
+        } ],
+        [ 'node_shared_v8=="false"', {
           'sources': [
             'deps/v8/include/v8.h',
             'deps/v8/include/v8-debug.h',
@@ -180,7 +191,7 @@
 
         [ 'OS=="win"', {
           'sources': [
-            'tools/msvs/res/node.rc',
+            'src/res/node.rc',
           ],
           'defines': [
             'FD_SETSIZE=1024',
@@ -189,13 +200,12 @@
             '_UNICODE=1',
           ],
           'libraries': [ '-lpsapi.lib' ]
-        },{ # POSIX
+        }, { # POSIX
           'defines': [ '__POSIX__' ],
           'sources': [
             'src/node_signal_watcher.cc',
-            'src/node_stat_watcher.cc',
             'src/node_io_watcher.cc',
-          ]
+          ],
         }],
         [ 'OS=="mac"', {
           'libraries': [ '-framework Carbon' ],
@@ -216,6 +226,7 @@
         [ 'OS=="solaris"', {
           'libraries': [
             '-lkstat',
+            '-lumem',
           ],
         }],
       ],
@@ -225,7 +236,23 @@
         },
       },
     },
-
+    # generate ETW header and resource files
+    {
+      'target_name': 'node_etw',
+      'type': 'none',
+      'conditions': [
+        [ 'node_use_etw=="true"', {
+          'actions': [
+            {
+              'action_name': 'node_etw',
+              'inputs': [ 'src/res/node_etw_provider.man' ],
+              'outputs': [ '<(SHARED_INTERMEDIATE_DIR)' ],
+              'action': [ 'mc <@(_inputs) -h <@(_outputs) -r <@(_outputs)' ]
+            }
+          ]
+        } ]
+      ]
+    },
     {
       'target_name': 'node_js2c',
       'type': 'none',
@@ -248,7 +275,7 @@
           # action?
 
           'conditions': [
-            [ 'node_use_dtrace=="true"', {
+            [ 'node_use_dtrace=="true" or node_use_etw=="true"', {
               'action': [
                 'python',
                 'tools/js2c.py',

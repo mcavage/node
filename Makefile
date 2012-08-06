@@ -3,6 +3,12 @@
 BUILDTYPE ?= Release
 PYTHON ?= python
 DESTDIR ?=
+SIGN ?=
+
+# Default to verbose builds.
+# To do quiet/pretty builds, run `make V=` to set V to an empty string,
+# or set the V environment variable to an empty string.
+V ?= 1
 
 # BUILDTYPE=Debug builds both release and debug builds. If you want to compile
 # just the debug build, run `make -C out BUILDTYPE=Debug` instead.
@@ -17,27 +23,27 @@ endif
 .PHONY: node node_g
 
 node: config.gypi
-	$(MAKE) -C out BUILDTYPE=Release
+	$(MAKE) -C out BUILDTYPE=Release V=$(V)
 	ln -fs out/Release/node node
 
 node_g: config.gypi
-	$(MAKE) -C out BUILDTYPE=Debug
+	$(MAKE) -C out BUILDTYPE=Debug V=$(V)
 	ln -fs out/Debug/node node_g
 
 config.gypi: configure
 	./configure
 
 out/Debug/node:
-	$(MAKE) -C out BUILDTYPE=Debug
+	$(MAKE) -C out BUILDTYPE=Debug V=$(V)
 
 out/Makefile: common.gypi deps/uv/uv.gyp deps/http_parser/http_parser.gyp deps/zlib/zlib.gyp deps/v8/build/common.gypi deps/v8/tools/gyp/v8.gyp node.gyp config.gypi
-	tools/gyp_node -f make
+	$(PYTHON) tools/gyp_node -f make
 
 install: all
-	out/Release/node tools/installer.js install $(DESTDIR)
+	$(PYTHON) tools/install.py $@ $(DESTDIR)
 
 uninstall:
-	out/Release/node tools/installer.js uninstall
+	$(PYTHON) tools/install.py $@ $(DESTDIR)
 
 clean:
 	-rm -rf out/Makefile node node_g out/$(BUILDTYPE)/node blog.html email.md
@@ -53,7 +59,7 @@ distclean:
 
 test: all
 	$(PYTHON) tools/test.py --mode=release simple message
-	PYTHONPATH=tools/closure_linter/ $(PYTHON) tools/closure_linter/closure_linter/gjslint.py --unix_mode --strict --nojsdoc -r lib/ -r src/ --exclude_files lib/punycode.js
+	$(MAKE) jslint
 
 test-http1: all
 	$(PYTHON) tools/test.py --mode=release --use-http1 simple message
@@ -61,16 +67,16 @@ test-http1: all
 test-valgrind: all
 	$(PYTHON) tools/test.py --mode=release --valgrind simple message
 
-node_modules/weak:
+test/gc/node_modules/weak/build:
 	@if [ ! -f node ]; then make all; fi
-	@if [ ! -d node_modules ]; then mkdir -p node_modules; fi
-	./node deps/npm/bin/npm-cli.js install weak \
-		--prefix="$(shell pwd)" --unsafe-perm # go ahead and run as root.
+	./node deps/npm/node_modules/node-gyp/bin/node-gyp rebuild \
+		--directory="$(shell pwd)/test/gc/node_modules/weak" \
+		--nodedir="$(shell pwd)"
 
-test-gc: all node_modules/weak
+test-gc: all test/gc/node_modules/weak/build
 	$(PYTHON) tools/test.py --mode=release gc
 
-test-all: all node_modules/weak
+test-all: all test/gc/node_modules/weak/build
 	$(PYTHON) tools/test.py --mode=debug,release
 	make test-npm
 
@@ -130,7 +136,13 @@ website_files = \
 	out/doc/changelog.html \
 	$(doc_images)
 
-doc: program $(apidoc_dirs) $(website_files) $(apiassets) $(apidocs) tools/doc/
+doc: $(apidoc_dirs) $(website_files) $(apiassets) $(apidocs) tools/doc/ blog node
+
+blogclean:
+	rm -rf out/blog
+
+blog: doc/blog out/Release/node tools/blog
+	out/Release/node tools/blog/generate.js doc/blog/ out/blog/ doc/blog.html doc/rss.xml
 
 $(apidoc_dirs):
 	mkdir -p $@
@@ -138,19 +150,19 @@ $(apidoc_dirs):
 out/doc/api/assets/%: doc/api_assets/% out/doc/api/assets/
 	cp $< $@
 
-out/doc/changelog.html: ChangeLog doc/changelog-head.html doc/changelog-foot.html tools/build-changelog.sh
+out/doc/changelog.html: ChangeLog doc/changelog-head.html doc/changelog-foot.html tools/build-changelog.sh node
 	bash tools/build-changelog.sh
 
-out/doc/%.html: doc/%.html
+out/doc/%.html: doc/%.html node
 	cat $< | sed -e 's|__VERSION__|'$(VERSION)'|g' > $@
 
 out/doc/%: doc/%
 	cp -r $< $@
 
-out/doc/api/%.json: doc/api/%.markdown
+out/doc/api/%.json: doc/api/%.markdown node
 	out/Release/node tools/doc/generate.js --format=json $< > $@
 
-out/doc/api/%.html: doc/api/%.markdown
+out/doc/api/%.html: doc/api/%.markdown node
 	out/Release/node tools/doc/generate.js --format=html --template=doc/template.html $< > $@
 
 email.md: ChangeLog tools/email-footer.md
@@ -159,6 +171,9 @@ email.md: ChangeLog tools/email-footer.md
 
 blog.html: email.md
 	cat $< | ./node tools/doc/node_modules/.bin/marked > $@
+
+blog-upload: blog
+	rsync -r out/blog/ node@nodejs.org:~/web/nodejs.org/blog/
 
 website-upload: doc
 	rsync -r out/doc/ node@nodejs.org:~/web/nodejs.org/
@@ -192,10 +207,11 @@ $(PKG):
 	rm -rf $(PKGDIR)
 	rm -rf out/deps out/Release
 	./configure --prefix=$(PKGDIR)/32/usr/local --without-snapshot --dest-cpu=ia32
-	$(MAKE) install
+	$(MAKE) install V=$(V)
 	rm -rf out/deps out/Release
 	./configure --prefix=$(PKGDIR)/usr/local --without-snapshot --dest-cpu=x64
-	$(MAKE) install
+	$(MAKE) install V=$(V)
+	SIGN="$(SIGN)" PKGDIR="$(PKGDIR)" bash tools/osx-codesign.sh
 	lipo $(PKGDIR)/32/usr/local/bin/node \
 		$(PKGDIR)/usr/local/bin/node \
 		-output $(PKGDIR)/usr/local/bin/node-universal \
@@ -203,11 +219,23 @@ $(PKG):
 	mv $(PKGDIR)/usr/local/bin/node-universal $(PKGDIR)/usr/local/bin/node
 	rm -rf $(PKGDIR)/32
 	$(packagemaker) \
-		--id "org.nodejs.NodeJS-$(VERSION)" \
+		--id "org.nodejs.Node" \
 		--doc tools/osx-pkg.pmdoc \
 		--out $(PKG)
+	SIGN="$(SIGN)" PKG="$(PKG)" bash tools/osx-productsign.sh
 
-$(TARBALL): node out/doc
+$(TARBALL): node doc
+	@if [ "$(shell git status --porcelain | egrep -v '^\?\? ')" = "" ]; then \
+		exit 0 ; \
+	else \
+	  echo "" >&2 ; \
+		echo "The git repository is not clean." >&2 ; \
+		echo "Please commit changes before building release tarball." >&2 ; \
+		echo "" >&2 ; \
+		git status --porcelain | egrep -v '^\?\?' >&2 ; \
+		echo "" >&2 ; \
+		exit 1 ; \
+	fi
 	@if [ $(shell ./node --version) = "$(VERSION)" ]; then \
 		exit 0; \
 	else \
@@ -218,11 +246,12 @@ $(TARBALL): node out/doc
 		exit 1 ; \
 	fi
 	git archive --format=tar --prefix=$(TARNAME)/ HEAD | tar xf -
-	mkdir -p $(TARNAME)/doc
+	mkdir -p $(TARNAME)/doc/api
 	cp doc/node.1 $(TARNAME)/doc/node.1
-	cp -r out/doc/api $(TARNAME)/doc/api
+	cp -r out/doc/api/* $(TARNAME)/doc/api/
 	rm -rf $(TARNAME)/deps/v8/test # too big
 	rm -rf $(TARNAME)/doc/images # too big
+	find $(TARNAME)/ -type l | xargs rm # annoying on windows
 	tar -cf $(TARNAME).tar $(TARNAME)
 	rm -rf $(TARNAME)
 	gzip -f -9 $(TARNAME).tar
@@ -240,6 +269,9 @@ bench-idle:
 	sleep 1
 	./node benchmark/idle_clients.js &
 
+jslintfix:
+	PYTHONPATH=tools/closure_linter/ $(PYTHON) tools/closure_linter/closure_linter/fixjsstyle.py --strict --nojsdoc -r lib/ -r src/ --exclude_files lib/punycode.js
+
 jslint:
 	PYTHONPATH=tools/closure_linter/ $(PYTHON) tools/closure_linter/closure_linter/gjslint.py --unix_mode --strict --nojsdoc -r lib/ -r src/ --exclude_files lib/punycode.js
 
@@ -248,4 +280,4 @@ cpplint:
 
 lint: jslint cpplint
 
-.PHONY: lint cpplint jslint bench clean docopen docclean doc dist distclean check uninstall install install-includes install-bin all program staticlib dynamiclib test test-all website-upload pkg
+.PHONY: lint cpplint jslint bench clean docopen docclean doc dist distclean check uninstall install install-includes install-bin all staticlib dynamiclib test test-all website-upload pkg blog blogclean

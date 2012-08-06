@@ -23,6 +23,12 @@
 # define _WIN32_WINNT   0x0502
 #endif
 
+#if !defined(_SSIZE_T_) && !defined(_SSIZE_T_DEFINED)
+typedef intptr_t ssize_t;
+# define _SSIZE_T_
+# define _SSIZE_T_DEFINED
+#endif
+
 #include <process.h>
 #include <stdint.h>
 #include <winsock2.h>
@@ -165,9 +171,13 @@ typedef struct uv_buf_t {
 
 typedef int uv_file;
 
+typedef struct _stati64 uv_statbuf_t;
+
 typedef SOCKET uv_os_sock_t;
 
 typedef HANDLE uv_thread_t;
+
+typedef HANDLE uv_sem_t;
 
 typedef CRITICAL_SECTION uv_mutex_t;
 
@@ -351,6 +361,7 @@ RB_HEAD(uv_timer_tree_s, uv_timer_s);
   uv_write_t ipc_header_write_req;        \
   int ipc_pid;                            \
   uint64_t remaining_ipc_rawdata_bytes;   \
+  unsigned char reserved[sizeof(void*)];  \
   struct {                                \
     WSAPROTOCOL_INFOW* socket_info;       \
     int tcp_connection;                   \
@@ -454,7 +465,7 @@ RB_HEAD(uv_timer_tree_s, uv_timer_s);
   struct uv_process_close_s {             \
     UV_REQ_FIELDS                         \
   } close_req;                            \
-  HANDLE child_stdio[3];                  \
+  BYTE* child_stdio_buffer;               \
   int exit_signal;                        \
   DWORD spawn_errno;                      \
   HANDLE wait_handle;                     \
@@ -465,15 +476,16 @@ RB_HEAD(uv_timer_tree_s, uv_timer_s);
   int flags;                              \
   DWORD sys_errno_;                       \
   union {                                 \
-    wchar_t* pathw;                       \
-    int file;                             \
+    /* TODO: remove me in 0.9. */         \
+    WCHAR* pathw;                         \
+    int fd;                               \
   };                                      \
   union {                                 \
     struct {                              \
       int mode;                           \
-      wchar_t* new_pathw;                 \
+      WCHAR* new_pathw;                   \
       int file_flags;                     \
-      int file_out;                       \
+      int fd_out;                         \
       void* buf;                          \
       size_t length;                      \
       int64_t offset;                     \

@@ -85,7 +85,9 @@
 
 namespace node {
 
-int Start(int argc, char *argv[]);
+NODE_EXTERN extern bool no_deprecation;
+
+NODE_EXTERN int Start(int argc, char *argv[]);
 
 char** Init(int argc, char *argv[]);
 v8::Handle<v8::Object> SetupProcessObject(int argc, char *argv[]);
@@ -131,32 +133,20 @@ enum encoding ParseEncoding(v8::Handle<v8::Value> encoding_v,
 NODE_EXTERN void FatalException(v8::TryCatch &try_catch);
 void DisplayExceptionLine(v8::TryCatch &try_catch); // hack
 
-v8::Local<v8::Value> Encode(const void *buf, size_t len,
-                            enum encoding encoding = BINARY);
+NODE_EXTERN v8::Local<v8::Value> Encode(const void *buf, size_t len,
+                                        enum encoding encoding = BINARY);
 
 // Returns -1 if the handle was not valid for decoding
-ssize_t DecodeBytes(v8::Handle<v8::Value>,
-                    enum encoding encoding = BINARY);
+NODE_EXTERN ssize_t DecodeBytes(v8::Handle<v8::Value>,
+                                enum encoding encoding = BINARY);
 
 // returns bytes written.
-ssize_t DecodeWrite(char *buf,
-                    size_t buflen,
-                    v8::Handle<v8::Value>,
-                    enum encoding encoding = BINARY);
+NODE_EXTERN ssize_t DecodeWrite(char *buf,
+                                size_t buflen,
+                                v8::Handle<v8::Value>,
+                                enum encoding encoding = BINARY);
 
-// Use different stat structs & calls on windows and posix;
-// on windows, _stati64 is utf-8 and big file aware.
-#if __POSIX__
-# define NODE_STAT        stat
-# define NODE_FSTAT       fstat
-# define NODE_STAT_STRUCT struct stat
-#else // _WIN32
-# define NODE_STAT        _stati64
-# define NODE_FSTAT       _fstati64
-# define NODE_STAT_STRUCT struct _stati64
-#endif
-
-v8::Local<v8::Object> BuildStatsObject(NODE_STAT_STRUCT *s);
+v8::Local<v8::Object> BuildStatsObject(const uv_statbuf_t* s);
 
 
 /**
@@ -222,9 +212,9 @@ node_module_struct* get_builtin_module(const char *name);
  * When this version number is changed, node.js will refuse
  * to load older modules.  This should be done whenever
  * an API is broken in the C++ side, including in v8 or
- * other dependencies
+ * other dependencies.
  */
-#define NODE_MODULE_VERSION (1)
+#define NODE_MODULE_VERSION 0x000A /* v0.10 */
 
 #define NODE_STANDARD_MODULE_STUFF \
           NODE_MODULE_VERSION,     \
@@ -273,5 +263,12 @@ MakeCallback(const v8::Handle<v8::Object> object,
              const v8::Handle<v8::Function> callback,
              int argc,
              v8::Handle<v8::Value> argv[]);
+
 }  // namespace node
+
+#if !defined(NODE_WANT_INTERNALS) && !defined(_WIN32)
+# include "ev-emul.h"
+# include "eio-emul.h"
+#endif
+
 #endif  // SRC_NODE_H_

@@ -66,21 +66,26 @@ Heap::Heap()
     : isolate_(NULL),
 // semispace_size_ should be a power of 2 and old_generation_size_ should be
 // a multiple of Page::kPageSize.
-#if defined(ANDROID)
-#define LUMP_OF_MEMORY (128 * KB)
-      code_range_size_(0),
-#elif defined(V8_TARGET_ARCH_X64)
+#if defined(V8_TARGET_ARCH_X64)
 #define LUMP_OF_MEMORY (2 * MB)
       code_range_size_(512*MB),
 #else
 #define LUMP_OF_MEMORY MB
       code_range_size_(0),
 #endif
+#if defined(ANDROID)
+      reserved_semispace_size_(4 * Max(LUMP_OF_MEMORY, Page::kPageSize)),
+      max_semispace_size_(4 * Max(LUMP_OF_MEMORY, Page::kPageSize)),
+      initial_semispace_size_(Page::kPageSize),
+      max_old_generation_size_(192*MB),
+      max_executable_size_(max_old_generation_size_),
+#else
       reserved_semispace_size_(8 * Max(LUMP_OF_MEMORY, Page::kPageSize)),
       max_semispace_size_(8 * Max(LUMP_OF_MEMORY, Page::kPageSize)),
       initial_semispace_size_(Page::kPageSize),
       max_old_generation_size_(700ul * LUMP_OF_MEMORY),
       max_executable_size_(256l * LUMP_OF_MEMORY),
+#endif
 
 // Variables set based on semispace_size_ and old_generation_size_ in
 // ConfigureHeap (survived_since_last_expansion_, external_allocation_limit_)
@@ -2469,7 +2474,7 @@ bool Heap::CreateApiObjects() {
   // bottleneck to trap the Smi-only -> fast elements transition, and there
   // appears to be no benefit for optimize this case.
   Map* new_neander_map = Map::cast(obj);
-  new_neander_map->set_elements_kind(FAST_ELEMENTS);
+  new_neander_map->set_elements_kind(TERMINAL_FAST_ELEMENTS_KIND);
   set_neander_map(new_neander_map);
 
   { MaybeObject* maybe_obj = AllocateJSObjectFromMap(neander_map());
@@ -3017,8 +3022,8 @@ MaybeObject* Heap::AllocateSharedFunctionInfo(Object* name) {
   share->set_initial_map(undefined_value(), SKIP_WRITE_BARRIER);
   share->set_this_property_assignments(undefined_value(), SKIP_WRITE_BARRIER);
   share->set_ast_node_count(0);
-  share->set_deopt_counter(FLAG_deopt_every_n_times);
-  share->set_ic_age(0);
+  share->set_stress_deopt_counter(FLAG_deopt_every_n_times);
+  share->set_counters(0);
 
   // Set integer fields (smi or int, depending on the architecture).
   share->set_length(0);
@@ -3050,6 +3055,7 @@ MaybeObject* Heap::AllocateJSMessageObject(String* type,
   }
   JSMessageObject* message = JSMessageObject::cast(result);
   message->set_properties(Heap::empty_fixed_array(), SKIP_WRITE_BARRIER);
+  message->initialize_elements();
   message->set_elements(Heap::empty_fixed_array(), SKIP_WRITE_BARRIER);
   message->set_type(type);
   message->set_arguments(arguments);
@@ -3325,6 +3331,8 @@ MaybeObject* Heap::AllocateExternalStringFromAscii(
     isolate()->context()->mark_out_of_memory();
     return Failure::OutOfMemoryException();
   }
+
+  ASSERT(String::IsAscii(resource->data(), static_cast<int>(length)));
 
   Map* map = external_ascii_string_map();
   Object* result;
@@ -3663,7 +3671,8 @@ MaybeObject* Heap::AllocateFunctionPrototype(JSFunction* function) {
   Map* new_map;
   ASSERT(object_function->has_initial_map());
   { MaybeObject* maybe_map =
-        object_function->initial_map()->CopyDropTransitions();
+        object_function->initial_map()->CopyDropTransitions(
+            DescriptorArray::MAY_BE_SHARED);
     if (!maybe_map->To<Map>(&new_map)) return maybe_map;
   }
   Object* prototype;
@@ -3751,7 +3760,7 @@ MaybeObject* Heap::AllocateArgumentsObject(Object* callee, int length) {
 
   // Check the state of the object
   ASSERT(JSObject::cast(result)->HasFastProperties());
-  ASSERT(JSObject::cast(result)->HasFastElements());
+  ASSERT(JSObject::cast(result)->HasFastObjectElements());
 
   return result;
 }
@@ -3796,7 +3805,7 @@ MaybeObject* Heap::AllocateInitialMap(JSFunction* fun) {
   map->set_inobject_properties(in_object_properties);
   map->set_unused_property_fields(in_object_properties);
   map->set_prototype(prototype);
-  ASSERT(map->has_fast_elements());
+  ASSERT(map->has_fast_object_elements());
 
   // If the function has only simple this property assignments add
   // field descriptors for these to the initial map as the object
@@ -3811,7 +3820,8 @@ MaybeObject* Heap::AllocateInitialMap(JSFunction* fun) {
       fun->shared()->ForbidInlineConstructor();
     } else {
       DescriptorArray* descriptors;
-      { MaybeObject* maybe_descriptors_obj = DescriptorArray::Allocate(count);
+      { MaybeObject* maybe_descriptors_obj =
+            DescriptorArray::Allocate(count, DescriptorArray::MAY_BE_SHARED);
         if (!maybe_descriptors_obj->To<DescriptorArray>(&descriptors)) {
           return maybe_descriptors_obj;
         }
@@ -3913,8 +3923,7 @@ MaybeObject* Heap::AllocateJSObjectFromMap(Map* map, PretenureFlag pretenure) {
   InitializeJSObjectFromMap(JSObject::cast(obj),
                             FixedArray::cast(properties),
                             map);
-  ASSERT(JSObject::cast(obj)->HasFastSmiOnlyElements() ||
-         JSObject::cast(obj)->HasFastElements());
+  ASSERT(JSObject::cast(obj)->HasFastSmiOrObjectElements());
   return obj;
 }
 
@@ -3959,6 +3968,9 @@ MaybeObject* Heap::AllocateJSArrayAndStorage(
     ArrayStorageAllocationMode mode,
     PretenureFlag pretenure) {
   ASSERT(capacity >= length);
+  if (length != 0 && mode == INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE) {
+    elements_kind = GetHoleyElementsKind(elements_kind);
+  }
   MaybeObject* maybe_array = AllocateJSArray(elements_kind, pretenure);
   JSArray* array;
   if (!maybe_array->To(&array)) return maybe_array;
@@ -3979,8 +3991,7 @@ MaybeObject* Heap::AllocateJSArrayAndStorage(
       maybe_elms = AllocateFixedDoubleArrayWithHoles(capacity);
     }
   } else {
-    ASSERT(elements_kind == FAST_ELEMENTS ||
-           elements_kind == FAST_SMI_ONLY_ELEMENTS);
+    ASSERT(IsFastSmiOrObjectElementsKind(elements_kind));
     if (mode == DONT_INITIALIZE_ARRAY_ELEMENTS) {
       maybe_elms = AllocateUninitializedFixedArray(capacity);
     } else {
@@ -4006,6 +4017,7 @@ MaybeObject* Heap::AllocateJSArrayWithElements(
 
   array->set_elements(elements);
   array->set_length(Smi::FromInt(elements->length()));
+  array->ValidateElements();
   return array;
 }
 
@@ -4490,6 +4502,16 @@ MaybeObject* Heap::AllocateRawAsciiString(int length, PretenureFlag pretenure) {
   String::cast(result)->set_length(length);
   String::cast(result)->set_hash_field(String::kEmptyHashField);
   ASSERT_EQ(size, HeapObject::cast(result)->Size());
+
+#ifdef DEBUG
+  if (FLAG_verify_heap) {
+    // Initialize string's content to ensure ASCII-ness (character range 0-127)
+    // as required when verifying the heap.
+    char* dest = SeqAsciiString::cast(result)->GetChars();
+    memset(dest, 0x0F, length * kCharSize);
+  }
+#endif  // DEBUG
+
   return result;
 }
 
@@ -4536,13 +4558,13 @@ MaybeObject* Heap::AllocateJSArray(
   Context* global_context = isolate()->context()->global_context();
   JSFunction* array_function = global_context->array_function();
   Map* map = array_function->initial_map();
-  if (elements_kind == FAST_DOUBLE_ELEMENTS) {
-    map = Map::cast(global_context->double_js_array_map());
-  } else if (elements_kind == FAST_ELEMENTS || !FLAG_smi_only_arrays) {
-    map = Map::cast(global_context->object_js_array_map());
-  } else {
-    ASSERT(elements_kind == FAST_SMI_ONLY_ELEMENTS);
-    ASSERT(map == global_context->smi_js_array_map());
+  Object* maybe_map_array = global_context->js_array_maps();
+  if (!maybe_map_array->IsUndefined()) {
+    Object* maybe_transitioned_map =
+        FixedArray::cast(maybe_map_array)->get(elements_kind);
+    if (!maybe_transitioned_map->IsUndefined()) {
+      map = Map::cast(maybe_transitioned_map);
+    }
   }
 
   return AllocateJSObjectFromMap(map, pretenure);
@@ -4827,9 +4849,7 @@ MaybeObject* Heap::AllocateGlobalContext() {
   }
   Context* context = reinterpret_cast<Context*>(result);
   context->set_map_no_write_barrier(global_context_map());
-  context->set_smi_js_array_map(undefined_value());
-  context->set_double_js_array_map(undefined_value());
-  context->set_object_js_array_map(undefined_value());
+  context->set_js_array_maps(undefined_value());
   ASSERT(context->IsGlobalContext());
   ASSERT(result->IsContext());
   return result;
@@ -4993,7 +5013,11 @@ void Heap::AdvanceIdleIncrementalMarking(intptr_t step_size) {
 
 
 bool Heap::IdleNotification(int hint) {
+  // Hints greater than this value indicate that
+  // the embedder is requesting a lot of GC work.
   const int kMaxHint = 1000;
+  // Minimal hint that allows to do full GC.
+  const int kMinHintForFullGC = 100;
   intptr_t size_factor = Min(Max(hint, 20), kMaxHint) / 4;
   // The size factor is in range [5..250]. The numbers here are chosen from
   // experiments. If you changes them, make sure to test with
@@ -5061,16 +5085,30 @@ bool Heap::IdleNotification(int hint) {
   mark_sweeps_since_idle_round_started_ += new_mark_sweeps;
   ms_count_at_last_idle_notification_ = ms_count_;
 
-  if (mark_sweeps_since_idle_round_started_ >= kMaxMarkSweepsInIdleRound) {
+  int remaining_mark_sweeps = kMaxMarkSweepsInIdleRound -
+                              mark_sweeps_since_idle_round_started_;
+
+  if (remaining_mark_sweeps <= 0) {
     FinishIdleRound();
     return true;
   }
 
   if (incremental_marking()->IsStopped()) {
-    incremental_marking()->Start();
+    // If there are no more than two GCs left in this idle round and we are
+    // allowed to do a full GC, then make those GCs full in order to compact
+    // the code space.
+    // TODO(ulan): Once we enable code compaction for incremental marking,
+    // we can get rid of this special case and always start incremental marking.
+    if (remaining_mark_sweeps <= 2 && hint >= kMinHintForFullGC) {
+      CollectAllGarbage(kReduceMemoryFootprintMask,
+                        "idle notification: finalize idle round");
+    } else {
+      incremental_marking()->Start();
+    }
   }
-
-  AdvanceIdleIncrementalMarking(step_size);
+  if (!incremental_marking()->IsStopped()) {
+    AdvanceIdleIncrementalMarking(step_size);
+  }
   return false;
 }
 

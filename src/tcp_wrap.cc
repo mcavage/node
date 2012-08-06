@@ -96,6 +96,9 @@ void TCPWrap::Initialize(Handle<Object> target) {
 
   NODE_SET_PROTOTYPE_METHOD(t, "close", HandleWrap::Close);
 
+  NODE_SET_PROTOTYPE_METHOD(t, "ref", HandleWrap::Ref);
+  NODE_SET_PROTOTYPE_METHOD(t, "unref", HandleWrap::Unref);
+
   NODE_SET_PROTOTYPE_METHOD(t, "readStart", StreamWrap::ReadStart);
   NODE_SET_PROTOTYPE_METHOD(t, "readStop", StreamWrap::ReadStop);
   NODE_SET_PROTOTYPE_METHOD(t, "shutdown", StreamWrap::Shutdown);
@@ -125,6 +128,18 @@ void TCPWrap::Initialize(Handle<Object> target) {
   oncomplete_sym = NODE_PSYMBOL("oncomplete");
 
   target->Set(String::NewSymbol("TCP"), tcpConstructor);
+}
+
+
+TCPWrap* TCPWrap::Unwrap(Local<Object> obj) {
+  assert(!obj.IsEmpty());
+  assert(obj->InternalFieldCount() > 0);
+  return static_cast<TCPWrap*>(obj->GetPointerFromInternalField(0));
+}
+
+
+uv_tcp_t* TCPWrap::UVHandle() {
+  return &handle_;
 }
 
 

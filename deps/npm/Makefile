@@ -101,16 +101,10 @@ man: $(cli_docs) $(api_docs)
 test:
 	node cli.js test
 
-version: link
-	git add package.json &&\
-	git ci -m v$(shell npm -v)
-
 publish: link doc
-	@git tag -d v$(shell npm -v) || true
 	@git push origin :v$(shell npm -v) || true
 	@npm unpublish npm@$(shell npm -v) || true
 	git clean -fd
-	git tag -s -m v$(shell npm -v) v$(shell npm -v) &&\
 	git push origin --tags &&\
 	npm publish &&\
 	npm tag npm@$(shell npm -v) $(shell npm -v | awk -F. '{print $$1 "." $$2}') &&\
@@ -119,16 +113,26 @@ publish: link doc
 
 docpublish: doc-publish
 doc-publish: doc
-	rsync -vazu --stats --no-implied-dirs --delete html/doc/ npmjs.org:/var/www/npmjs.org/public/doc
-	rsync -vazu --stats --no-implied-dirs --delete html/api/ npmjs.org:/var/www/npmjs.org/public/api
+	rsync -vazu --stats --no-implied-dirs --delete \
+		html/doc/ \
+		node@npmjs.org:/home/node/npm-www/doc
+	rsync -vazu --stats --no-implied-dirs --delete \
+		html/api/ \
+		node@npmjs.org:/home/node/npm-www/api
+	rsync -vazu --stats --no-implied-dirs --delete \
+		html/webfonts/ \
+		node@npmjs.org:/home/node/npm-www/static/webfonts
+	rsync -vazu --stats --no-implied-dirs --delete \
+		html/style.css \
+		node@npmjs.org:/home/node/npm-www/static/
 
 zip-publish: release
-	scp release/* npmjs.org:/var/www/npmjs.org/public/dist/
+	scp release/* izs.me:/var/www/izs.me/static/public/npm/
 
 release:
 	@bash scripts/release.sh
 
 sandwich:
-	@[ $$(whoami) = "root" ] && (echo "ok"; echo "ham" > sandwich) || echo "make it yourself"
+	@[ $$(whoami) = "root" ] && (echo "ok"; echo "ham" > sandwich) || echo "make it yourself" && exit 13
 
 .PHONY: all latest install dev link doc clean uninstall test man doc-publish doc-clean docclean docpublish release zip-publish

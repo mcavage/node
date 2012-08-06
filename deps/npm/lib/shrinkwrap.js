@@ -4,8 +4,7 @@
 module.exports = exports = shrinkwrap
 
 var npm = require("./npm.js")
-  , output = require("./utils/output.js")
-  , log = require("./utils/log.js")
+  , log = require("npmlog")
   , fs = require("fs")
   , path = require("path")
 
@@ -15,7 +14,7 @@ function shrinkwrap (args, silent, cb) {
   if (typeof cb !== "function") cb = silent, silent = false
 
   if (args.length) {
-    log.warn("shrinkwrap doesn't take positional args.")
+    log.warn("shrinkwrap", "doesn't take positional args")
   }
 
   npm.commands.ls([], true, function (er, _, pkginfo) {
@@ -33,7 +32,7 @@ function shrinkwrap_ (pkginfo, silent, cb) {
   try {
     var swdata = JSON.stringify(pkginfo, null, 2) + "\n"
   } catch (er) {
-    log.error("Error converting package info to json")
+    log.error("shrinkwrap", "Error converting package info to json")
     return cb(er)
   }
 
@@ -42,8 +41,7 @@ function shrinkwrap_ (pkginfo, silent, cb) {
   fs.writeFile(file, swdata, function (er) {
     if (er) return cb(er)
     if (silent) return cb(null, pkginfo)
-    output.write("wrote npm-shrinkwrap.json", function (er) {
-      cb(er, pkginfo)
-    })
+    console.log("wrote npm-shrinkwrap.json")
+    cb(null, pkginfo)
   })
 }

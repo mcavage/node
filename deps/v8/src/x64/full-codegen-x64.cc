@@ -659,7 +659,7 @@ void FullCodeGenerator::DoTest(Expression* condition,
                                Label* fall_through) {
   ToBooleanStub stub(result_register());
   __ push(result_register());
-  __ CallStub(&stub);
+  __ CallStub(&stub, condition->test_id());
   __ testq(result_register(), result_register());
   // The stub returns nonzero for true.
   Split(not_zero, if_true, if_false, fall_through);
@@ -779,10 +779,11 @@ void FullCodeGenerator::VisitVariableDeclaration(
   bool hole_init = mode == CONST || mode == CONST_HARMONY || mode == LET;
   switch (variable->location()) {
     case Variable::UNALLOCATED:
-      globals_->Add(variable->name());
+      globals_->Add(variable->name(), zone());
       globals_->Add(variable->binding_needs_init()
                         ? isolate()->factory()->the_hole_value()
-                        : isolate()->factory()->undefined_value());
+                    : isolate()->factory()->undefined_value(),
+                    zone());
       break;
 
     case Variable::PARAMETER:
@@ -837,12 +838,12 @@ void FullCodeGenerator::VisitFunctionDeclaration(
   Variable* variable = proxy->var();
   switch (variable->location()) {
     case Variable::UNALLOCATED: {
-      globals_->Add(variable->name());
+      globals_->Add(variable->name(), zone());
       Handle<SharedFunctionInfo> function =
           Compiler::BuildFunctionInfo(declaration->fun(), script());
       // Check for stack-overflow exception.
       if (function.is_null()) return SetStackOverflow();
-      globals_->Add(function);
+      globals_->Add(function, zone());
       break;
     }
 
@@ -894,8 +895,8 @@ void FullCodeGenerator::VisitModuleDeclaration(ModuleDeclaration* declaration) {
   switch (variable->location()) {
     case Variable::UNALLOCATED: {
       Comment cmnt(masm_, "[ ModuleDeclaration");
-      globals_->Add(variable->name());
-      globals_->Add(instance);
+      globals_->Add(variable->name(), zone());
+      globals_->Add(instance, zone());
       Visit(declaration->module());
       break;
     }
@@ -1567,7 +1568,7 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
   // Mark all computed expressions that are bound to a key that
   // is shadowed by a later occurrence of the same key. For the
   // marked expressions, no store code is emitted.
-  expr->CalculateEmitStore();
+  expr->CalculateEmitStore(zone());
 
   AccessorTable accessor_table(isolate()->zone());
   for (int i = 0; i < expr->properties()->length(); i++) {
@@ -1659,7 +1660,8 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   ASSERT_EQ(2, constant_elements->length());
   ElementsKind constant_elements_kind =
       static_cast<ElementsKind>(Smi::cast(constant_elements->get(0))->value());
-  bool has_constant_fast_elements = constant_elements_kind == FAST_ELEMENTS;
+  bool has_constant_fast_elements =
+      IsFastObjectElementsKind(constant_elements_kind);
   Handle<FixedArrayBase> constant_elements_values(
       FixedArrayBase::cast(constant_elements->get(1)));
 
@@ -1670,7 +1672,7 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   Heap* heap = isolate()->heap();
   if (has_constant_fast_elements &&
       constant_elements_values->map() == heap->fixed_cow_array_map()) {
-    // If the elements are already FAST_ELEMENTS, the boilerplate cannot
+    // If the elements are already FAST_*_ELEMENTS, the boilerplate cannot
     // change, so it's possible to specialize the stub in advance.
     __ IncrementCounter(isolate()->counters()->cow_arrays_created_stub(), 1);
     FastCloneShallowArrayStub stub(
@@ -1682,10 +1684,9 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   } else if (length > FastCloneShallowArrayStub::kMaximumClonedLength) {
     __ CallRuntime(Runtime::kCreateArrayLiteralShallow, 3);
   } else {
-    ASSERT(constant_elements_kind == FAST_ELEMENTS ||
-           constant_elements_kind == FAST_SMI_ONLY_ELEMENTS ||
+    ASSERT(IsFastSmiOrObjectElementsKind(constant_elements_kind) ||
            FLAG_smi_only_arrays);
-    // If the elements are already FAST_ELEMENTS, the boilerplate cannot
+    // If the elements are already FAST_*_ELEMENTS, the boilerplate cannot
     // change, so it's possible to specialize the stub in advance.
     FastCloneShallowArrayStub::Mode mode = has_constant_fast_elements
         ? FastCloneShallowArrayStub::CLONE_ELEMENTS
@@ -1713,9 +1714,9 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
     }
     VisitForAccumulatorValue(subexpr);
 
-    if (constant_elements_kind == FAST_ELEMENTS) {
-      // Fast-case array literal with ElementsKind of FAST_ELEMENTS, they cannot
-      // transition and don't need to call the runtime stub.
+    if (IsFastObjectElementsKind(constant_elements_kind)) {
+      // Fast-case array literal with ElementsKind of FAST_*_ELEMENTS, they
+      // cannot transition and don't need to call the runtime stub.
       int offset = FixedArray::kHeaderSize + (i * kPointerSize);
       __ movq(rbx, Operand(rsp, 0));  // Copy of array literal.
       __ movq(rbx, FieldOperand(rbx, JSObject::kElementsOffset));
@@ -2287,7 +2288,7 @@ void FullCodeGenerator::EmitCallWithStub(Call* expr, CallFunctionFlags flags) {
 
   CallFunctionStub stub(arg_count, flags);
   __ movq(rdi, Operand(rsp, (arg_count + 1) * kPointerSize));
-  __ CallStub(&stub);
+  __ CallStub(&stub, expr->id());
   RecordJSReturnSite(expr);
   // Restore context register.
   __ movq(rsi, Operand(rbp, StandardFrameConstants::kContextOffset));
@@ -3356,102 +3357,6 @@ void FullCodeGenerator::EmitRegExpConstructResult(CallRuntime* expr) {
   VisitForStackValue(args->at(1));
   VisitForStackValue(args->at(2));
   __ CallStub(&stub);
-  context()->Plug(rax);
-}
-
-
-void FullCodeGenerator::EmitSwapElements(CallRuntime* expr) {
-  ZoneList<Expression*>* args = expr->arguments();
-  ASSERT(args->length() == 3);
-  VisitForStackValue(args->at(0));
-  VisitForStackValue(args->at(1));
-  VisitForStackValue(args->at(2));
-  Label done;
-  Label slow_case;
-  Register object = rax;
-  Register index_1 = rbx;
-  Register index_2 = rcx;
-  Register elements = rdi;
-  Register temp = rdx;
-  __ movq(object, Operand(rsp, 2 * kPointerSize));
-  // Fetch the map and check if array is in fast case.
-  // Check that object doesn't require security checks and
-  // has no indexed interceptor.
-  __ CmpObjectType(object, JS_ARRAY_TYPE, temp);
-  __ j(not_equal, &slow_case);
-  __ testb(FieldOperand(temp, Map::kBitFieldOffset),
-           Immediate(KeyedLoadIC::kSlowCaseBitFieldMask));
-  __ j(not_zero, &slow_case);
-
-  // Check the object's elements are in fast case and writable.
-  __ movq(elements, FieldOperand(object, JSObject::kElementsOffset));
-  __ CompareRoot(FieldOperand(elements, HeapObject::kMapOffset),
-                 Heap::kFixedArrayMapRootIndex);
-  __ j(not_equal, &slow_case);
-
-  // Check that both indices are smis.
-  __ movq(index_1, Operand(rsp, 1 * kPointerSize));
-  __ movq(index_2, Operand(rsp, 0 * kPointerSize));
-  __ JumpIfNotBothSmi(index_1, index_2, &slow_case);
-
-  // Check that both indices are valid.
-  // The JSArray length field is a smi since the array is in fast case mode.
-  __ movq(temp, FieldOperand(object, JSArray::kLengthOffset));
-  __ SmiCompare(temp, index_1);
-  __ j(below_equal, &slow_case);
-  __ SmiCompare(temp, index_2);
-  __ j(below_equal, &slow_case);
-
-  __ SmiToInteger32(index_1, index_1);
-  __ SmiToInteger32(index_2, index_2);
-  // Bring addresses into index1 and index2.
-  __ lea(index_1, FieldOperand(elements, index_1, times_pointer_size,
-                               FixedArray::kHeaderSize));
-  __ lea(index_2, FieldOperand(elements, index_2, times_pointer_size,
-                               FixedArray::kHeaderSize));
-
-  // Swap elements.  Use object and temp as scratch registers.
-  __ movq(object, Operand(index_1, 0));
-  __ movq(temp,   Operand(index_2, 0));
-  __ movq(Operand(index_2, 0), object);
-  __ movq(Operand(index_1, 0), temp);
-
-  Label no_remembered_set;
-  __ CheckPageFlag(elements,
-                   temp,
-                   1 << MemoryChunk::SCAN_ON_SCAVENGE,
-                   not_zero,
-                   &no_remembered_set,
-                   Label::kNear);
-  // Possible optimization: do a check that both values are Smis
-  // (or them and test against Smi mask.)
-
-  // We are swapping two objects in an array and the incremental marker never
-  // pauses in the middle of scanning a single object.  Therefore the
-  // incremental marker is not disturbed, so we don't need to call the
-  // RecordWrite stub that notifies the incremental marker.
-  __ RememberedSetHelper(elements,
-                         index_1,
-                         temp,
-                         kDontSaveFPRegs,
-                         MacroAssembler::kFallThroughAtEnd);
-  __ RememberedSetHelper(elements,
-                         index_2,
-                         temp,
-                         kDontSaveFPRegs,
-                         MacroAssembler::kFallThroughAtEnd);
-
-  __ bind(&no_remembered_set);
-
-  // We are done. Drop elements from the stack, and return undefined.
-  __ addq(rsp, Immediate(3 * kPointerSize));
-  __ LoadRoot(rax, Heap::kUndefinedValueRootIndex);
-  __ jmp(&done);
-
-  __ bind(&slow_case);
-  __ CallRuntime(Runtime::kSwapElements, 3);
-
-  __ bind(&done);
   context()->Plug(rax);
 }
 
@@ -4555,15 +4460,50 @@ void FullCodeGenerator::EnterFinallyBlock() {
   __ subq(rdx, rcx);
   __ Integer32ToSmi(rdx, rdx);
   __ push(rdx);
+
   // Store result register while executing finally block.
   __ push(result_register());
+
+  // Store pending message while executing finally block.
+  ExternalReference pending_message_obj =
+      ExternalReference::address_of_pending_message_obj(isolate());
+  __ Load(rdx, pending_message_obj);
+  __ push(rdx);
+
+  ExternalReference has_pending_message =
+      ExternalReference::address_of_has_pending_message(isolate());
+  __ Load(rdx, has_pending_message);
+  __ push(rdx);
+
+  ExternalReference pending_message_script =
+      ExternalReference::address_of_pending_message_script(isolate());
+  __ Load(rdx, pending_message_script);
+  __ push(rdx);
 }
 
 
 void FullCodeGenerator::ExitFinallyBlock() {
   ASSERT(!result_register().is(rdx));
   ASSERT(!result_register().is(rcx));
+  // Restore pending message from stack.
+  __ pop(rdx);
+  ExternalReference pending_message_script =
+      ExternalReference::address_of_pending_message_script(isolate());
+  __ Store(pending_message_script, rdx);
+
+  __ pop(rdx);
+  ExternalReference has_pending_message =
+      ExternalReference::address_of_has_pending_message(isolate());
+  __ Store(has_pending_message, rdx);
+
+  __ pop(rdx);
+  ExternalReference pending_message_obj =
+      ExternalReference::address_of_pending_message_obj(isolate());
+  __ Store(pending_message_obj, rdx);
+
+  // Restore result register from stack.
   __ pop(result_register());
+
   // Uncook return address.
   __ pop(rdx);
   __ SmiToInteger32(rdx, rdx);

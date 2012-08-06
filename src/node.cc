@@ -26,7 +26,7 @@
 #include "uv.h"
 
 #include "v8-debug.h"
-#ifdef HAVE_DTRACE
+#if defined HAVE_DTRACE || defined HAVE_ETW
 # include "node_dtrace.h"
 #endif
 
@@ -69,7 +69,6 @@ typedef int mode_t;
 #include "node_http_parser.h"
 #ifdef __POSIX__
 # include "node_signal_watcher.h"
-# include "node_stat_watcher.h"
 #endif
 #include "node_constants.h"
 #include "node_javascript.h"
@@ -114,13 +113,12 @@ static Persistent<String> listeners_symbol;
 static Persistent<String> uncaught_exception_symbol;
 static Persistent<String> emit_symbol;
 
-static Persistent<String> enter_symbol;
-static Persistent<String> exit_symbol;
-static Persistent<String> disposed_symbol;
+static Persistent<Function> process_makeCallback;
 
 
 static bool print_eval = false;
 static bool force_repl = false;
+static bool trace_deprecation = false;
 static char *eval_string = NULL;
 static int option_end_index = 0;
 static bool use_debug_agent = false;
@@ -128,8 +126,9 @@ static bool debug_wait_connect = false;
 static int debug_port=5858;
 static int max_stack_size = 0;
 
-static uv_check_t check_tick_watcher;
-static uv_prepare_t prepare_tick_watcher;
+// used by C++ modules as well
+bool no_deprecation = false;
+
 static uv_idle_t tick_spinner;
 static bool need_tick_cb;
 static Persistent<String> tick_callback_sym;
@@ -246,7 +245,9 @@ static void Tick(void) {
 
   TryCatch try_catch;
 
-  cb->Call(process, 0, NULL);
+  // Let the tick callback know that this is coming from the spinner
+  Handle<Value> argv[] = { True() };
+  cb->Call(process, ARRAY_SIZE(argv), argv);
 
   if (try_catch.HasCaught()) {
     FatalException(try_catch);
@@ -260,6 +261,7 @@ static void Spin(uv_idle_t* handle, int status) {
   Tick();
 }
 
+
 static void StartTickSpinner() {
   need_tick_cb = true;
   // TODO: this tick_spinner shouldn't be necessary. An ev_prepare should be
@@ -270,23 +272,12 @@ static void StartTickSpinner() {
   uv_idle_start(&tick_spinner, Spin);
 }
 
+
 static Handle<Value> NeedTickCallback(const Arguments& args) {
   StartTickSpinner();
   return Undefined();
 }
 
-static void PrepareTick(uv_prepare_t* handle, int status) {
-  assert(handle == &prepare_tick_watcher);
-  assert(status == 0);
-  Tick();
-}
-
-
-static void CheckTick(uv_check_t* handle, int status) {
-  assert(handle == &check_tick_watcher);
-  assert(status == 0);
-  Tick();
-}
 
 static inline const char *errno_string(int errorno) {
 #define ERRNO_CASE(e)  case e: return #e;
@@ -1007,42 +998,27 @@ MakeCallback(const Handle<Object> object,
 
   TryCatch try_catch;
 
-  if (enter_symbol.IsEmpty()) {
-    enter_symbol = NODE_PSYMBOL("enter");
-    exit_symbol = NODE_PSYMBOL("exit");
-    disposed_symbol = NODE_PSYMBOL("_disposed");
-  }
-
-  Local<Value> domain_v = object->Get(domain_symbol);
-  Local<Object> domain;
-  Local<Function> enter;
-  Local<Function> exit;
-  if (!domain_v->IsUndefined()) {
-    domain = domain_v->ToObject();
-    if (domain->Get(disposed_symbol)->BooleanValue()) {
-      // domain has been disposed of.
-      return Undefined();
+  if (process_makeCallback.IsEmpty()) {
+    Local<Value> cb_v = process->Get(String::New("_makeCallback"));
+    if (!cb_v->IsFunction()) {
+      fprintf(stderr, "process._makeCallback assigned to non-function\n");
+      abort();
     }
-    enter = Local<Function>::Cast(domain->Get(enter_symbol));
-    enter->Call(domain, 0, NULL);
+    Local<Function> cb = cb_v.As<Function>();
+    process_makeCallback = Persistent<Function>::New(cb);
   }
 
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-    return Undefined();
+  Local<Array> argArray = Array::New(argc);
+  for (int i = 0; i < argc; i++) {
+    argArray->Set(Integer::New(i), argv[i]);
   }
 
-  Local<Value> ret = callback->Call(object, argc, argv);
+  Local<Value> object_l = Local<Value>::New(object);
+  Local<Value> callback_l = Local<Value>::New(callback);
 
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-    return Undefined();
-  }
+  Local<Value> args[3] = { object_l, callback_l, argArray };
 
-  if (!domain_v->IsUndefined()) {
-    exit = Local<Function>::Cast(domain->Get(exit_symbol));
-    exit->Call(domain, 0, NULL);
-  }
+  Local<Value> ret = process_makeCallback->Call(process, ARRAY_SIZE(args), args);
 
   if (try_catch.HasCaught()) {
     FatalException(try_catch);
@@ -1095,12 +1071,16 @@ enum encoding ParseEncoding(Handle<Value> encoding_v, enum encoding _default) {
   } else if (strcasecmp(*encoding, "hex") == 0) {
     return HEX;
   } else if (strcasecmp(*encoding, "raw") == 0) {
-    fprintf(stderr, "'raw' (array of integers) has been removed. "
-                    "Use 'binary'.\n");
+    if (!no_deprecation) {
+      fprintf(stderr, "'raw' (array of integers) has been removed. "
+                      "Use 'binary'.\n");
+    }
     return BINARY;
   } else if (strcasecmp(*encoding, "raws") == 0) {
-    fprintf(stderr, "'raws' encoding has been renamed to 'binary'. "
-                    "Please update your code.\n");
+    if (!no_deprecation) {
+      fprintf(stderr, "'raws' encoding has been renamed to 'binary'. "
+                      "Please update your code.\n");
+    }
     return BINARY;
   } else {
     return _default;
@@ -1207,8 +1187,15 @@ ssize_t DecodeWrite(char *buf,
   return buflen;
 }
 
-
 void DisplayExceptionLine (TryCatch &try_catch) {
+  // Prevent re-entry into this function.  For example, if there is
+  // a throw from a program in vm.runInThisContext(code, filename, true),
+  // then we want to show the original failure, not the secondary one.
+  static bool displayed_error = false;
+
+  if (displayed_error) return;
+  displayed_error = true;
+
   HandleScope scope;
 
   Handle<Message> message = try_catch.Message();
@@ -1227,33 +1214,37 @@ void DisplayExceptionLine (TryCatch &try_catch) {
     String::Utf8Value sourceline(message->GetSourceLine());
     const char* sourceline_string = *sourceline;
 
-    // HACK HACK HACK
-    //
-    // FIXME
-    //
-    // Because of how CommonJS modules work, all scripts are wrapped with a
-    // "function (function (exports, __filename, ...) {"
+    // Because of how node modules work, all scripts are wrapped with a
+    // "function (module, exports, __filename, ...) {"
     // to provide script local variables.
     //
     // When reporting errors on the first line of a script, this wrapper
-    // function is leaked to the user. This HACK is to remove it. The length
-    // of the wrapper is 62. That wrapper is defined in src/node.js
+    // function is leaked to the user. There used to be a hack here to
+    // truncate off the first 62 characters, but it caused numerous other
+    // problems when vm.runIn*Context() methods were used for non-module
+    // code.
     //
-    // If that wrapper is ever changed, then this number also has to be
-    // updated. Or - someone could clean this up so that the two peices
-    // don't need to be changed.
+    // If we ever decide to re-instate such a hack, the following steps
+    // must be taken:
     //
-    // Even better would be to get support into V8 for wrappers that
-    // shouldn't be reported to users.
-    int offset = linenum == 1 ? 62 : 0;
+    // 1. Pass a flag around to say "this code was wrapped"
+    // 2. Update the stack frame output so that it is also correct.
+    //
+    // It would probably be simpler to add a line rather than add some
+    // number of characters to the first line, since V8 truncates the
+    // sourceline to 78 characters, and we end up not providing very much
+    // useful debugging info to the user if we remove 62 characters.
 
-    fprintf(stderr, "%s\n", sourceline_string + offset);
-    // Print wavy underline (GetUnderline is deprecated).
     int start = message->GetStartColumn();
-    for (int i = offset; i < start; i++) {
+    int end = message->GetEndColumn();
+
+    // fprintf(stderr, "---\nsourceline:%s\noffset:%d\nstart:%d\nend:%d\n---\n", sourceline_string, start, end);
+
+    fprintf(stderr, "%s\n", sourceline_string);
+    // Print wavy underline (GetUnderline is deprecated).
+    for (int i = 0; i < start; i++) {
       fputc((sourceline_string[i] == '\t') ? '\t' : ' ', stderr);
     }
-    int end = message->GetEndColumn();
     for (int i = start; i < end; i++) {
       fputc('^', stderr);
     }
@@ -1683,6 +1674,11 @@ Handle<Value> Hrtime(const v8::Arguments& args) {
 
   if (args.Length() > 0) {
     // return a time diff tuple
+    if (!args[0]->IsArray()) {
+      Local<Value> exception = Exception::TypeError(
+          String::New("process.hrtime() only accepts an Array tuple."));
+      return ThrowException(exception);
+    }
     Local<Array> inArray = Local<Array>::Cast(args[0]);
     uint64_t seconds = inArray->Get(0)->Uint32Value();
     uint64_t nanos = inArray->Get(1)->Uint32Value();
@@ -1705,7 +1701,6 @@ Handle<Value> DLOpen(const v8::Arguments& args) {
   HandleScope scope;
   char symbol[1024], *base, *pos;
   uv_lib_t lib;
-  node_module_struct compat_mod;
   int r;
 
   if (args.Length() < 2) {
@@ -1759,27 +1754,20 @@ Handle<Value> DLOpen(const v8::Arguments& args) {
     return ThrowException(exception);
   }
 
-  // Get the init() function from the dynamically shared object.
   node_module_struct *mod;
   if (uv_dlsym(&lib, symbol, reinterpret_cast<void**>(&mod))) {
-    /* Start Compatibility hack: Remove once everyone is using NODE_MODULE macro */
-    memset(&compat_mod, 0, sizeof compat_mod);
-
-    mod = &compat_mod;
-    mod->version = NODE_MODULE_VERSION;
-
-    if (uv_dlsym(&lib, "init", reinterpret_cast<void**>(&mod->register_func))) {
-      Local<String> errmsg = String::New(uv_dlerror(&lib));
-      uv_dlclose(&lib);
-      return ThrowException(Exception::Error(errmsg));
-    }
-    /* End Compatibility hack */
+    char errmsg[1024];
+    snprintf(errmsg, sizeof(errmsg), "Symbol %s not found.", symbol);
+    return ThrowError(errmsg);
   }
 
   if (mod->version != NODE_MODULE_VERSION) {
-    Local<Value> exception = Exception::Error(
-        String::New("Module version mismatch, refusing to load."));
-    return ThrowException(exception);
+    char errmsg[1024];
+    snprintf(errmsg,
+             sizeof(errmsg),
+             "Module version mismatch. Expected %d, got %d.",
+             NODE_MODULE_VERSION, mod->version);
+    return ThrowError(errmsg);
   }
 
   // Execute the C++ module
@@ -1846,9 +1834,6 @@ void FatalException(TryCatch &try_catch) {
     ReportException(event_try_catch, true);
     exit(1);
   }
-
-  // This makes sure uncaught exceptions don't interfere with process.nextTick
-  StartTickSpinner();
 }
 
 
@@ -1952,8 +1937,8 @@ static Handle<Value> EnvGetter(Local<String> property,
     return scope.Close(String::New(reinterpret_cast<uint16_t*>(buffer), result));
   }
 #endif
-  // Not found
-  return Undefined();
+  // Not found.  Fetch from prototype.
+  return scope.Close(info.Data().As<Object>()->Get(property));
 }
 
 
@@ -2123,8 +2108,9 @@ Handle<Object> SetupProcessObject(int argc, char *argv[]) {
 
   Local<FunctionTemplate> process_template = FunctionTemplate::New();
 
-  process = Persistent<Object>::New(process_template->GetFunction()->NewInstance());
+  process_template->SetClassName(String::NewSymbol("process"));
 
+  process = Persistent<Object>::New(process_template->GetFunction()->NewInstance());
 
   process->SetAccessor(String::New("title"),
                        ProcessTitleGetter,
@@ -2132,11 +2118,6 @@ Handle<Object> SetupProcessObject(int argc, char *argv[]) {
 
   // process.version
   process->Set(String::NewSymbol("version"), String::New(NODE_VERSION));
-
-#ifdef NODE_PREFIX
-  // process.installPrefix
-  process->Set(String::NewSymbol("installPrefix"), String::New(NODE_PREFIX));
-#endif
 
   // process.moduleLoadList
   module_load_list = Persistent<Array>::New(Array::New());
@@ -2207,7 +2188,7 @@ Handle<Object> SetupProcessObject(int argc, char *argv[]) {
                                        EnvQuery,
                                        EnvDeleter,
                                        EnvEnumerator,
-                                       Undefined());
+                                       Object::New());
   Local<Object> env = envTemplate->NewInstance();
   process->Set(String::NewSymbol("env"), env);
 
@@ -2227,6 +2208,16 @@ Handle<Object> SetupProcessObject(int argc, char *argv[]) {
   // -i, --interactive
   if (force_repl) {
     process->Set(String::NewSymbol("_forceRepl"), True());
+  }
+
+  // --no-deprecation
+  if (no_deprecation) {
+    process->Set(String::NewSymbol("noDeprecation"), True());
+  }
+
+  // --trace-deprecation
+  if (trace_deprecation) {
+    process->Set(String::NewSymbol("traceDeprecation"), True());
   }
 
   size_t size = 2*PATH_MAX;
@@ -2325,7 +2316,7 @@ void Load(Handle<Object> process_l) {
   Local<Object> global = v8::Context::GetCurrent()->Global();
   Local<Value> args[1] = { Local<Value>::New(process_l) };
 
-#ifdef HAVE_DTRACE
+#if defined HAVE_DTRACE || defined HAVE_ETW
   InitDTrace(global);
 #endif
 
@@ -2376,8 +2367,9 @@ static void PrintHelp() {
          "  -p, --print          print result of --eval\n"
          "  -i, --interactive    always enter the REPL even if stdin\n"
          "                       does not appear to be a terminal\n"
+         "  --no-deprecation     silence deprecation warnings\n"
+         "  --trace-deprecation  show stack traces on deprecations\n"
          "  --v8-options         print v8 command line options\n"
-         "  --vars               print various compiled-in variables\n"
          "  --max-stack-size=val set max v8 stack size (bytes)\n"
          "\n"
          "Environment variables:\n"
@@ -2407,14 +2399,6 @@ static void ParseArgs(int argc, char **argv) {
     } else if (strcmp(arg, "--version") == 0 || strcmp(arg, "-v") == 0) {
       printf("%s\n", NODE_VERSION);
       exit(0);
-    } else if (strcmp(arg, "--vars") == 0) {
-#ifdef NODE_PREFIX
-      printf("NODE_PREFIX: %s\n", NODE_PREFIX);
-#endif
-#ifdef NODE_CFLAGS
-      printf("NODE_CFLAGS: %s\n", NODE_CFLAGS);
-#endif
-      exit(0);
     } else if (strstr(arg, "--max-stack-size=") == arg) {
       const char *p = 0;
       p = 1 + strchr(arg, '=');
@@ -2442,6 +2426,12 @@ static void ParseArgs(int argc, char **argv) {
       argv[i] = const_cast<char*>("");
     } else if (strcmp(arg, "--v8-options") == 0) {
       argv[i] = const_cast<char*>("--help");
+    } else if (strcmp(arg, "--no-deprecation") == 0) {
+      argv[i] = const_cast<char*>("");
+      no_deprecation = true;
+    } else if (strcmp(arg, "--trace-deprecation") == 0) {
+      argv[i] = const_cast<char*>("");
+      trace_deprecation = true;
     } else if (argv[i][0] != '-') {
       break;
     }
@@ -2454,10 +2444,34 @@ static void ParseArgs(int argc, char **argv) {
 static Isolate* node_isolate = NULL;
 static volatile bool debugger_running = false;
 
+
+static uv_async_t dispatch_debug_messages_async;
+
+
+// Called from the main thread.
+static void DispatchDebugMessagesAsyncCallback(uv_async_t* handle, int status) {
+  v8::Debug::ProcessDebugMessages();
+}
+
+
+// Called from V8 Debug Agent TCP thread.
+static void DispatchMessagesDebugAgentCallback() {
+  uv_async_send(&dispatch_debug_messages_async);
+}
+
+
 static void EnableDebug(bool wait_connect) {
   // If we're called from another thread, make sure to enter the right
   // v8 isolate.
   node_isolate->Enter();
+
+  v8::Debug::SetDebugMessageDispatchHandler(DispatchMessagesDebugAgentCallback,
+                                            false);
+
+  uv_async_init(uv_default_loop(),
+                &dispatch_debug_messages_async,
+                DispatchDebugMessagesAsyncCallback);
+  uv_unref((uv_handle_t*) &dispatch_debug_messages_async);
 
   // Start the debug thread and it's associated TCP server on port 5858.
   bool r = v8::Debug::EnableAgent("node " NODE_VERSION,
@@ -2698,6 +2712,9 @@ char** Init(int argc, char *argv[]) {
   // Initialize prog_start_time to get relative uptime.
   uv_uptime(&prog_start_time);
 
+  // Make inherited handles noninheritable.
+  uv_disable_stdio_inheritance();
+
   // Parse a few arguments which are specific to Node.
   node::ParseArgs(argc, argv);
   // Parse the rest of the args (up to the 'option_end_index' (where '--' was
@@ -2737,14 +2754,6 @@ char** Init(int argc, char *argv[]) {
   RegisterSignalHandler(SIGINT, SignalExit);
   RegisterSignalHandler(SIGTERM, SignalExit);
 #endif // __POSIX__
-
-  uv_prepare_init(uv_default_loop(), &prepare_tick_watcher);
-  uv_prepare_start(&prepare_tick_watcher, PrepareTick);
-  uv_unref(reinterpret_cast<uv_handle_t*>(&prepare_tick_watcher));
-
-  uv_check_init(uv_default_loop(), &check_tick_watcher);
-  uv_check_start(&check_tick_watcher, node::CheckTick);
-  uv_unref(reinterpret_cast<uv_handle_t*>(&check_tick_watcher));
 
   uv_idle_init(uv_default_loop(), &tick_spinner);
 

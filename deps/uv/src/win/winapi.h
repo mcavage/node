@@ -28,11 +28,6 @@
 /*
  * Ntdll headers
  */
-#ifndef _NTDEF_
-  typedef LONG NTSTATUS;
-  typedef NTSTATUS *PNTSTATUS;
-#endif
-
 #ifndef STATUS_SEVERITY_SUCCESS
 # define STATUS_SEVERITY_SUCCESS 0x0
 #endif
@@ -4137,6 +4132,10 @@ typedef struct _FILE_BASIC_INFORMATION {
   DWORD FileAttributes;
 } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
 
+typedef struct _FILE_DISPOSITION_INFORMATION {
+  BOOLEAN DeleteFile;
+} FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
+
 typedef struct _FILE_MODE_INFORMATION {
   ULONG Mode;
 } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
@@ -4206,6 +4205,19 @@ typedef enum _FILE_INFORMATION_CLASS {
   FileRemoteProtocolInformation,
   FileMaximumInformation
 } FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
+
+typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
+    LARGE_INTEGER IdleTime;
+    LARGE_INTEGER KernelTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER DpcTime;
+    LARGE_INTEGER InterruptTime;
+    ULONG InterruptCount;
+} SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, *PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
+
+#ifndef SystemProcessorPerformanceInformation
+# define SystemProcessorPerformanceInformation 8
+#endif
 
 #ifndef DEVICE_TYPE
 # define DEVICE_TYPE DWORD
@@ -4323,6 +4335,12 @@ typedef NTSTATUS (NTAPI *sNtSetInformationFile)
                   ULONG Length,
                   FILE_INFORMATION_CLASS FileInformationClass);
 
+typedef NTSTATUS (NTAPI *sNtQuerySystemInformation)
+                 (UINT SystemInformationClass,
+                  PVOID SystemInformation,
+                  ULONG SystemInformationLength,
+                  PULONG ReturnLength);
+
 
 /*
  * Kernel32 headers
@@ -4359,6 +4377,11 @@ typedef NTSTATUS (NTAPI *sNtSetInformationFile)
 
 #ifndef ENABLE_EXTENDED_FLAGS
 # define ENABLE_EXTENDED_FLAGS 0x80
+#endif
+
+/* from winerror.h */
+#ifndef ERROR_SYMLINK_NOT_SUPPORTED
+# define ERROR_SYMLINK_NOT_SUPPORTED 1464
 #endif
 
 typedef BOOL (WINAPI *sGetQueuedCompletionStatusEx)
@@ -4405,11 +4428,12 @@ typedef VOID (WINAPI* sReleaseSRWLockExclusive)
 
 
 
-/* Ntapi function pointers */
+/* Ntdll function pointers */
 extern sRtlNtStatusToDosError pRtlNtStatusToDosError;
 extern sNtDeviceIoControlFile pNtDeviceIoControlFile;
 extern sNtQueryInformationFile pNtQueryInformationFile;
 extern sNtSetInformationFile pNtSetInformationFile;
+extern sNtQuerySystemInformation pNtQuerySystemInformation;
 
 
 /* Kernel32 function pointers */

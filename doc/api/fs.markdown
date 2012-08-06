@@ -71,14 +71,23 @@ to the completion callback.
 
 Synchronous rename(2).
 
-## fs.truncate(fd, len, [callback])
+## fs.ftruncate(fd, len, [callback])
 
 Asynchronous ftruncate(2). No arguments other than a possible exception are
 given to the completion callback.
 
-## fs.truncateSync(fd, len)
+## fs.ftruncateSync(fd, len)
 
 Synchronous ftruncate(2).
+
+## fs.truncate(path, len, [callback])
+
+Asynchronous truncate(2). No arguments other than a possible exception are
+given to the completion callback.
+
+## fs.truncateSync(path, len)
+
+Synchronous truncate(2).
 
 ## fs.chown(path, uid, gid, [callback])
 
@@ -130,6 +139,8 @@ Synchronous fchmod(2).
 Asynchronous lchmod(2). No arguments other than a possible exception
 are given to the completion callback.
 
+Only available on Mac OS X.
+
 ## fs.lchmodSync(path, mode)
 
 Synchronous lchmod(2).
@@ -174,7 +185,7 @@ the completion callback.
 
 Synchronous link(2).
 
-## fs.symlink(destination, path, [type], [callback])
+## fs.symlink(srcpath, dstpath, [type], [callback])
 
 Asynchronous symlink(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -183,7 +194,7 @@ used on Windows (ignored on other platforms).
 Note that Windows junction points require the destination path to be absolute.  When using
 `'junction'`, the `destination` argument will automatically be normalized to absolute path.
 
-## fs.symlinkSync(destination, path, [type])
+## fs.symlinkSync(srcpath, dstpath, [type])
 
 Synchronous symlink(2).
 
@@ -355,13 +366,7 @@ without waiting for the callback. For this scenario,
 
 ## fs.writeSync(fd, buffer, offset, length, position)
 
-Synchronous version of buffer-based `fs.write()`. Returns the number of bytes
-written.
-
-## fs.writeSync(fd, str, position, [encoding])
-
-Synchronous version of string-based `fs.write()`. `encoding` defaults to
-`'utf8'`. Returns the number of _bytes_ written.
+Synchronous version of `fs.write()`. Returns the number of bytes written.
 
 ## fs.read(fd, buffer, offset, length, position, [callback])
 
@@ -380,13 +385,7 @@ The callback is given the three arguments, `(err, bytesRead, buffer)`.
 
 ## fs.readSync(fd, buffer, offset, length, position)
 
-Synchronous version of buffer-based `fs.read`. Returns the number of
-`bytesRead`.
-
-## fs.readSync(fd, length, position, encoding)
-
-Legacy synchronous version of string-based `fs.read`. Returns an array with the
-data from the file specified and number of bytes read, `[string, bytesRead]`.
+Synchronous version of `fs.read`. Returns the number of `bytesRead`.
 
 ## fs.readFile(filename, [encoding], [callback])
 
@@ -456,8 +455,7 @@ The second argument is optional. The `options` if provided should be an object
 containing two members a boolean, `persistent`, and `interval`. `persistent`
 indicates whether the process should continue to run as long as files are
 being watched. `interval` indicates how often the target should be polled,
-in milliseconds. (On Linux systems with inotify, `interval` is ignored.) The
-default is `{ persistent: true, interval: 0 }`.
+in milliseconds. The default is `{ persistent: true, interval: 5007 }`.
 
 The `listener` gets two arguments the current stat object and the previous
 stat object:
@@ -472,12 +470,16 @@ These stat objects are instances of `fs.Stat`.
 If you want to be notified when the file was modified, not just accessed
 you need to compare `curr.mtime` and `prev.mtime`.
 
-
-## fs.unwatchFile(filename)
+## fs.unwatchFile(filename, [listener])
 
     Stability: 2 - Unstable.  Use fs.watch instead, if available.
 
-Stop watching for changes on `filename`.
+Stop watching for changes on `filename`. If `listener` is specified, only that
+particular listener is removed. Otherwise, *all* listeners are removed and you
+have effectively stopped watching `filename`.
+
+Calling `fs.unwatchFile()` with a filename that is not being watched is a
+no-op, not an error.
 
 ## fs.watch(filename, [options], [listener])
 
